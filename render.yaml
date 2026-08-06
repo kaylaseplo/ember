@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: ai-companion
+    runtime: node
+    plan: free
+    buildCommand: |
+      cd backend && npm ci
+      cd ../frontend && npm ci && npm run build
+    startCommand: node backend/server.js
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: DATA_DIR
+        value: /opt/render/project/src/data
