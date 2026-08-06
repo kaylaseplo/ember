@@ -9,7 +9,19 @@ function MoodChart({ entries }) {
   const points = entries.map((e, i) => `${x(i)},${y(e.mood)}`).join(' ')
   return (
     <svg viewBox={`0 0 ${w} ${h}`} className="mood-chart" role="img"
-         aria-label="Mood over time">
+         aria-label="Warmth over time">
+      <defs>
+        <linearGradient id="emberFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#E8833A" stopOpacity="0.35" />
+          <stop offset="100%" stopColor="#E8833A" stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      {n > 1 && (
+        <polygon
+          points={`${x(0)},${h - pad} ${points} ${x(n - 1)},${h - pad}`}
+          fill="url(#emberFill)"
+        />
+      )}
       {[1, 5, 10].map(v => (
         <g key={v}>
           <line x1={pad} x2={w - pad} y1={y(v)} y2={y(v)} className="gridline" />
@@ -35,9 +47,9 @@ export default function Moods() {
 
   return (
     <div className="page">
-      <h2>Mood over time</h2>
+      <h2>Warmth over time</h2>
       {entries.length === 0 ? (
-        <p className="muted">No mood ratings yet — rate your mood when ending a chat.</p>
+        <p className="muted">No ratings yet — you can rate your mood when you end a chat.</p>
       ) : (
         <>
           <MoodChart entries={entries} />

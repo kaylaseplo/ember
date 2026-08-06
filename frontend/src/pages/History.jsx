@@ -25,9 +25,9 @@ export default function History() {
 
   return (
     <div className="page">
-      <h2>Past conversations</h2>
+      <h2>Entries</h2>
       {list === null && <p className="muted">Loading…</p>}
-      {list?.length === 0 && <p className="muted">No saved sessions yet — start one in Chat.</p>}
+      {list?.length === 0 && <p className="muted">Nothing saved yet — your entries will gather here.</p>}
       {list?.map(c => (
         <button key={c.id} className="card"
                 onClick={() => getConversation(c.id).then(setOpen)}>

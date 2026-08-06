@@ -6,24 +6,23 @@ import Summaries from './pages/Summaries.jsx'
 
 const TABS = [
   { id: 'chat', label: 'Chat', icon: '💬' },
-  { id: 'history', label: 'History', icon: '📖' },
+  { id: 'history', label: 'Entries', icon: '📖' },
   { id: 'moods', label: 'Moods', icon: '📈' },
   { id: 'summaries', label: 'Insights', icon: '✨' },
 ]
 
 export default function App() {
   const [tab, setTab] = useState('chat')
-  const [dark, setDark] = useState(
-    () => window.matchMedia('(prefers-color-scheme: dark)').matches
-  )
+  // Warm dark is Ember's default; light is the alternate.
+  const [light, setLight] = useState(false)
 
   return (
-    <div className={`app ${dark ? 'dark' : ''}`}>
+    <div className={`app ${light ? 'light' : ''}`}>
       <header className="topbar">
-        <span className="brand">Companion</span>
-        <button className="theme-toggle" onClick={() => setDark(d => !d)}
-                aria-label="Toggle dark mode">
-          {dark ? '☀️' : '🌙'}
+        <span className="brand">Ember</span>
+        <button className="theme-toggle" onClick={() => setLight(l => !l)}
+                aria-label="Toggle light mode">
+          {light ? '🌙' : '☀️'}
         </button>
       </header>
 

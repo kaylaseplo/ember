@@ -1,12 +1,12 @@
-# AI Support Companion (web app)
+# Ember
 
-A private, full-stack support companion for processing emotions between therapy
-sessions — chat with streaming responses, mood tracking with a trend chart,
-conversation history, and cross-session pattern insights. Works on phone and
-desktop browsers.
+A private support companion for processing emotions between therapy sessions —
+chat with streaming responses, mood tracking with a trend chart, past entries,
+and cross-session pattern insights. Warm, dark, and quiet by design. Works on
+phone and desktop browsers, and can be added to an iPhone home screen (PWA).
 
 - **Backend**: Node.js/Express + Anthropic SDK (Claude Opus 4.8) + SQLite
-- **Frontend**: React (Vite), mobile-first, dark mode, served by the backend
+- **Frontend**: React (Vite), mobile-first, warm dark theme by default, served by the backend
 
 ## Run locally
 

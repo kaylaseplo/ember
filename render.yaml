@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: ai-companion
+    name: ember
     runtime: node
     plan: free
     buildCommand: |

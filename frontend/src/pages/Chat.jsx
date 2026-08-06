@@ -51,10 +51,10 @@ export default function Chat() {
   if (savedSummary !== null) {
     return (
       <div className="chat-done">
-        <h2>Session saved 💛</h2>
+        <h2>Saved.</h2>
         <p className="summary-text">{savedSummary}</p>
         <button className="primary" onClick={() => setSavedSummary(null)}>
-          Start a new conversation
+          Start a new entry
         </button>
       </div>
     )
@@ -66,7 +66,7 @@ export default function Chat() {
         {messages.length === 0 && !partial && (
           <div className="welcome">
             <h2>Welcome back.</h2>
-            <p>This is your space — type whatever's on your mind.</p>
+            <p className="tagline">still here, still warm</p>
           </div>
         )}
         {messages.map((m, i) => (
