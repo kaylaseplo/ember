@@ -10,5 +10,9 @@ services:
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false
+      - key: APP_PASSCODE
+        sync: false
+      - key: SESSION_SECRET
+        sync: false
       - key: DATA_DIR
         value: /opt/render/project/src/data

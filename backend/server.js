@@ -11,6 +11,7 @@
 // Env: ANTHROPIC_API_KEY (required). DB lives at DATA_DIR/companion.db.
 // Serves the built React frontend from ../frontend/dist when present.
 
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -28,11 +29,104 @@ const SYSTEM_PROMPT_FILE = path.join(BASE_DIR, '..', 'SYSTEM_PROMPT.md')
 const FRONTEND_DIST = path.join(BASE_DIR, '..', 'frontend', 'dist')
 const PORT = process.env.PORT || 8000
 
+const PASSCODE = process.env.APP_PASSCODE
+if (!PASSCODE) {
+  console.error(
+    'FATAL: APP_PASSCODE is not set. Refusing to start unprotected — set the ' +
+      'APP_PASSCODE environment variable and restart.'
+  )
+  process.exit(1)
+}
+let SESSION_SECRET = process.env.SESSION_SECRET
+if (!SESSION_SECRET) {
+  SESSION_SECRET = crypto.randomBytes(32).toString('hex')
+  console.warn(
+    'WARNING: SESSION_SECRET is not set — generated a temporary one. Sessions ' +
+      'will not survive a server restart. Set SESSION_SECRET to fix this.'
+  )
+}
+
 const app = express()
 app.use(cors())
 app.use(express.json({ limit: '2mb' }))
 
 const client = new Anthropic() // reads ANTHROPIC_API_KEY
+
+// ---------- auth ----------
+
+const COOKIE_NAME = 'ember_session'
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
+
+const sign = (value) =>
+  crypto.createHmac('sha256', SESSION_SECRET).update(value).digest('hex')
+
+function makeToken() {
+  const expires = String(Date.now() + SESSION_TTL_MS)
+  return `${expires}.${sign(expires)}`
+}
+
+function timingSafeEqual(a, b) {
+  const ha = crypto.createHash('sha256').update(String(a)).digest()
+  const hb = crypto.createHash('sha256').update(String(b)).digest()
+  return crypto.timingSafeEqual(ha, hb)
+}
+
+function isAuthenticated(req) {
+  const cookies = req.headers.cookie || ''
+  const match = cookies.split(/;\s*/).find((c) => c.startsWith(`${COOKIE_NAME}=`))
+  if (!match) return false
+  const [expires, sig] = match.slice(COOKIE_NAME.length + 1).split('.')
+  if (!expires || !sig) return false
+  if (!timingSafeEqual(sig, sign(expires))) return false
+  return Number(expires) > Date.now()
+}
+
+// In-memory rate limit for /api/login: 10 attempts per 15 minutes per IP.
+const LOGIN_WINDOW_MS = 15 * 60 * 1000
+const LOGIN_MAX_ATTEMPTS = 10
+const loginAttempts = new Map() // ip -> { count, resetAt }
+
+function loginRateLimited(ip) {
+  const now = Date.now()
+  for (const [k, v] of loginAttempts) if (v.resetAt <= now) loginAttempts.delete(k)
+  const entry = loginAttempts.get(ip) || { count: 0, resetAt: now + LOGIN_WINDOW_MS }
+  entry.count += 1
+  loginAttempts.set(ip, entry)
+  return entry.count > LOGIN_MAX_ATTEMPTS
+}
+
+app.post('/api/login', (req, res) => {
+  if (loginRateLimited(req.ip)) {
+    return res.status(429).json({ error: 'Too many attempts — try again in a bit.' })
+  }
+  const { passcode } = req.body || {}
+  if (typeof passcode !== 'string' || !timingSafeEqual(passcode, PASSCODE)) {
+    return res.status(401).json({ error: 'wrong passcode' })
+  }
+  res.cookie(COOKIE_NAME, makeToken(), {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'strict',
+    maxAge: SESSION_TTL_MS,
+    path: '/',
+  })
+  res.json({ ok: true })
+})
+
+app.post('/api/logout', (req, res) => {
+  res.clearCookie(COOKIE_NAME, { httpOnly: true, secure: true, sameSite: 'strict', path: '/' })
+  res.json({ ok: true })
+})
+
+app.get('/api/session', (req, res) => {
+  res.json({ authenticated: isAuthenticated(req) })
+})
+
+// Everything else under /api requires a valid session cookie.
+app.use('/api', (req, res, next) => {
+  if (!isAuthenticated(req)) return res.status(401).json({ error: 'unauthorized' })
+  next()
+})
 
 // ---------- database ----------
 

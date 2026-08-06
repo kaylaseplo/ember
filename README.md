@@ -12,6 +12,8 @@ phone and desktop browsers, and can be added to an iPhone home screen (PWA).
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
+export APP_PASSCODE=...       # the passcode that unlocks the app (required)
+export SESSION_SECRET=...     # long random string used to sign session cookies
 
 # backend
 cd backend && npm install && npm start   # or `npm run dev` for auto-reload
@@ -27,7 +29,9 @@ backend — it serves `frontend/dist` at `/`.
 
 1. Push this repo to GitHub.
 2. On render.com: **New → Blueprint**, pick the repo (uses `render.yaml`).
-3. Set `ANTHROPIC_API_KEY` when prompted. Done.
+3. Set `ANTHROPIC_API_KEY`, `APP_PASSCODE`, and `SESSION_SECRET` when prompted
+   (all three must be set before deploying; the server refuses to start
+   without `APP_PASSCODE`). Done.
 
 Note: on Render's free tier the filesystem is ephemeral — the SQLite DB resets
 on redeploy. Attach a persistent disk (paid) and point `DATA_DIR` at it to keep
@@ -38,18 +42,37 @@ history across deploys.
 1. Push to GitHub, create a new Railway project from the repo.
 2. Build command: `cd backend && npm ci && cd ../frontend && npm ci && npm run build`
 3. Start command: `node backend/server.js`
-4. Add `ANTHROPIC_API_KEY`. Optionally mount a volume and set `DATA_DIR` to it.
+4. Add `ANTHROPIC_API_KEY`, `APP_PASSCODE`, and `SESSION_SECRET`. Optionally
+   mount a volume and set `DATA_DIR` to it.
 
 ## API
 
 | Method | Path | Purpose |
 |---|---|---|
+| POST | `/api/login` | Exchange the passcode for a 30-day session cookie |
+| POST | `/api/logout` | Clear the session cookie (the Lock button) |
+| GET | `/api/session` | `{authenticated: bool}` for the current request |
 | POST | `/api/chat` | Stream a reply (send `{messages: [...]}`, receive plain-text chunks) |
 | POST | `/api/end-session` | Save conversation + mood; generates a summary |
 | GET | `/api/conversations` | List past conversations |
 | GET | `/api/conversations/{id}` | Full conversation |
 | GET | `/api/moods` | Mood history, average, trend |
 | GET | `/api/summaries` | Session summaries + cross-session patterns |
+
+All `/api/*` routes except `login`, `logout`, and `session` require the
+session cookie and return 401 without it.
+
+## Environment variables
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | yes | Claude API access (server-side only) |
+| `APP_PASSCODE` | yes | The single-user passcode; the server refuses to start without it |
+| `SESSION_SECRET` | recommended | Signs session cookies. If unset, a random one is generated at boot (sessions won't survive restarts) |
+| `DATA_DIR` | no | Where `companion.db` lives (defaults to `./data`) |
+
+Never commit real values for any of these — set them in Render/Railway's
+environment settings.
 
 The Anthropic API key lives only on the server (`ANTHROPIC_API_KEY` env var);
 the frontend never sees it. The system prompt is `SYSTEM_PROMPT.md` at the repo
