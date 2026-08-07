@@ -40,6 +40,8 @@ export default function App() {
   const [light, setLight] = useState(false)
   const [user, setUser] = useState(undefined) // undefined = checking, null = signed out
   const [showOnboarding, setShowOnboarding] = useState(false)
+  const [chatActive, setChatActive] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
 
   useEffect(() => {
     getMe().then(u => {
@@ -60,6 +62,20 @@ export default function App() {
     await logout()
     setUser(null)
     setShowOnboarding(false)
+    setMenuOpen(false)
+  }
+
+  function endConversation() {
+    setTab('chat')
+    window.dispatchEvent(new Event('ember:end'))
+  }
+
+  function startOver() {
+    setMenuOpen(false)
+    if (window.confirm('Start over? This conversation will close and stay in Entries.')) {
+      setTab('chat')
+      window.dispatchEvent(new Event('ember:startover'))
+    }
   }
 
   function signedIn(u) {
@@ -87,17 +103,29 @@ export default function App() {
       <header className="topbar" style={veiled ? { display: 'none' } : undefined}>
         <span className="brand">Ember</span>
         <span className="topbar-actions">
-          <button className="theme-toggle" onClick={() => setLight(l => !l)}
-                  aria-label="Toggle light mode">
-            {light ? '🌙' : '☀️'}
-          </button>
-          <button className="theme-toggle signout" onClick={() => setShowOnboarding(true)}
-                  aria-label="Replay the introduction">
-            Intro
-          </button>
-          <button className="theme-toggle signout" onClick={signOut} aria-label="Sign out">
-            Sign out
-          </button>
+          {chatActive && (
+            <button className="topbar-end" onClick={endConversation}>End</button>
+          )}
+          <span className="menu-wrap">
+            <button className="theme-toggle" onClick={() => setMenuOpen(o => !o)}
+                    aria-label="More options" aria-expanded={menuOpen}>
+              &#x22EF;
+            </button>
+            {menuOpen && (
+              <span className="menu-panel" role="menu">
+                <button role="menuitem" onClick={() => { setLight(l => !l); setMenuOpen(false) }}>
+                  {light ? 'Dark theme' : 'Light theme'}
+                </button>
+                <button role="menuitem" onClick={() => { setShowOnboarding(true); setMenuOpen(false) }}>
+                  Intro
+                </button>
+                {chatActive && (
+                  <button role="menuitem" onClick={startOver}>Start over</button>
+                )}
+                <button role="menuitem" onClick={signOut}>Sign out</button>
+              </span>
+            )}
+          </span>
         </span>
       </header>
 
@@ -105,6 +133,7 @@ export default function App() {
         {/* Chat stays mounted so an in-progress conversation survives tab switches */}
         <div style={{ display: tab === 'chat' ? 'contents' : 'none' }}>
           <Chat firstTime={!user?.hasConversations} userId={user?.id}
+                onActiveChange={setChatActive}
                 onSessionSaved={() => setUser(u => (u ? { ...u, hasConversations: true } : u))} />
         </div>
         {tab === 'history' && <History />}

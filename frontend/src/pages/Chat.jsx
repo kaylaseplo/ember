@@ -7,7 +7,7 @@ const FIRST_OPENERS = [
   "I've been feeling off and I'm not sure why",
 ]
 
-export default function Chat({ firstTime = false, userId, onSessionSaved }) {
+export default function Chat({ firstTime = false, userId, onSessionSaved, onActiveChange }) {
   const [messages, setMessages] = useState([])
   const [conversationId, setConversationId] = useState(null)
   const [resumeChecked, setResumeChecked] = useState(false)
@@ -18,10 +18,27 @@ export default function Chat({ firstTime = false, userId, onSessionSaved }) {
   const [saving, setSaving] = useState(false)
   const [savedSummary, setSavedSummary] = useState(null)
   const scrollRef = useRef(null)
+  const inputRef = useRef(null)
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages, partial])
+
+  const active = messages.length > 0
+  useEffect(() => { onActiveChange?.(active) }, [active])
+
+  // Topbar "End" and the overflow menu's "Start over" drive the chat from
+  // outside this component.
+  useEffect(() => {
+    const onEnd = () => { if (messages.length > 0 && !streaming) setEnding(true) }
+    const onStartOver = () => startOver()
+    window.addEventListener('ember:end', onEnd)
+    window.addEventListener('ember:startover', onStartOver)
+    return () => {
+      window.removeEventListener('ember:end', onEnd)
+      window.removeEventListener('ember:startover', onStartOver)
+    }
+  })
 
   // On sign-in, pick up any open conversation so nothing typed earlier is
   // lost — but never clobber messages already on screen (e.g. after a 401
@@ -48,6 +65,7 @@ export default function Chat({ firstTime = false, userId, onSessionSaved }) {
     const next = [...messages, { role: 'user', content: text }]
     setMessages(next)
     setInput('')
+    if (inputRef.current) inputRef.current.style.height = 'auto'
     setStreaming(true)
     setPartial('')
     try {
@@ -154,8 +172,13 @@ export default function Chat({ firstTime = false, userId, onSessionSaved }) {
       ) : (
         <div className="composer">
           <textarea
+            ref={inputRef}
             value={input}
-            onChange={e => setInput(e.target.value)}
+            onChange={e => {
+              setInput(e.target.value)
+              e.target.style.height = 'auto'
+              e.target.style.height = Math.min(e.target.scrollHeight, 150) + 'px'
+            }}
             onKeyDown={e => {
               if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
             }}
@@ -165,12 +188,6 @@ export default function Chat({ firstTime = false, userId, onSessionSaved }) {
           <button className="primary send" onClick={() => send()} disabled={streaming || !input.trim()}>
             ↑
           </button>
-          {messages.length > 0 && !streaming && (
-            <button className="ghost end" onClick={() => setEnding(true)}>End</button>
-          )}
-          {messages.length > 0 && !streaming && (
-            <button className="startover" onClick={startOver}>Start over</button>
-          )}
         </div>
       )}
     </div>
