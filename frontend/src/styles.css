@@ -2,34 +2,38 @@
 
 /* Ember — warm dark is the default theme; light is the alternate. */
 :root {
-  --bg: #16130F;
-  --surface: #211C17;
-  --text: #F0E9E1;
-  --muted: #9A8F84;
-  --accent: #E8833A;
-  --accent-deep: #C2551B;
-  --accent-soft: #33241A;
-  --border: #322B24;
-  --user-bubble: #3A2818;
-  --user-text: #F0E9E1;
-  --glow: 0 0 14px rgba(232, 131, 58, 0.28);
+  --bg: #241A15;
+  --surface: #33241D;
+  --raised: #3D2B22;
+  --text: #F7EDE6;
+  --muted: #C0A597;
+  --accent: #F75629;
+  --accent-deep: #D63C23;
+  --accent-soft: #7A2214;
+  --accent-bright: #FE7133;
+  --border: #4F392E;
+  --user-bubble: #7A2214;
+  --user-text: #F7EDE6;
+  --glow: 0 0 16px rgba(247, 86, 41, 0.35);
 }
 .app.light {
   --bg: #faf6f0;
   --surface: #ffffff;
+  --raised: #ffffff;
   --text: #2d2a26;
   --muted: #8a8378;
-  --accent: #C2551B;
-  --accent-deep: #A03F0E;
-  --accent-soft: #f3e2da;
+  --accent: #D63C23;
+  --accent-deep: #A82D18;
+  --accent-soft: #f6d9ce;
+  --accent-bright: #D63C23;
   --border: #e8e1d6;
-  --user-bubble: #f3e2da;
+  --user-bubble: #f6d9ce;
   --user-text: #2d2a26;
-  --glow: 0 0 12px rgba(194, 85, 27, 0.2);
+  --glow: 0 0 12px rgba(214, 60, 35, 0.2);
 }
 
 html, body, #root { height: 100%; }
-html { background: #16130F; }
+html { background: #241A15; }
 body {
   font-family: Georgia, 'Times New Roman', serif;
   -webkit-font-smoothing: antialiased;
@@ -39,12 +43,16 @@ body {
   height: 100dvh;
   display: flex;
   flex-direction: column;
-  background: var(--bg);
+  /* Barely-there warm lift toward the top center so the bg isn't a flat block */
+  background:
+    radial-gradient(120% 60% at 50% 0%, rgba(254, 113, 51, 0.05), transparent 70%),
+    var(--bg);
   color: var(--text);
   max-width: 720px;
   margin: 0 auto;
   line-height: 1.6;
 }
+.app.light { background: var(--bg); }
 
 .topbar {
   display: flex; justify-content: space-between; align-items: center;
@@ -79,7 +87,6 @@ body {
   align-self: flex-end;
   background: var(--user-bubble);
   color: var(--user-text);
-  border: 1px solid var(--accent-soft);
   border-bottom-right-radius: 6px;
 }
 .bubble.assistant {
@@ -94,7 +101,7 @@ body {
   display: flex; gap: 8px; align-items: flex-end;
   padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
   border-top: 1px solid var(--border);
-  background: var(--surface);
+  background: var(--raised);
 }
 .composer textarea {
   flex: 1; resize: none; border: 1px solid var(--border); border-radius: 22px;
@@ -102,15 +109,15 @@ body {
   background: var(--bg); color: var(--text); max-height: 120px;
 }
 .composer textarea::placeholder { color: var(--muted); }
-.composer textarea:focus { outline: 1px solid var(--accent-deep); border-color: var(--accent-deep); }
+.composer textarea:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
 
 button { font: inherit; cursor: pointer; }
 .primary {
-  background: var(--accent); color: #1B120A; border: none;
+  background: var(--accent); color: #FFF4EE; border: none;
   border-radius: 22px; padding: 11px 18px;
   box-shadow: var(--glow);
 }
-.primary:hover { background: var(--accent-deep); color: #F0E9E1; }
+.primary:hover { background: var(--accent-deep); }
 .primary:disabled { opacity: 0.45; cursor: default; box-shadow: none; }
 .send { width: 44px; height: 44px; padding: 0; font-size: 1.2rem; }
 .ghost {
@@ -120,13 +127,13 @@ button { font: inherit; cursor: pointer; }
 .end { align-self: center; }
 
 /* ---------- mood picker / done ---------- */
-.mood-picker { padding: 18px 16px calc(18px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: var(--surface); text-align: center; }
+.mood-picker { padding: 18px 16px calc(18px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: var(--raised); text-align: center; }
 .mood-scale { display: flex; gap: 8px; justify-content: center; margin: 14px 0; flex-wrap: wrap; }
 .mood-btn {
   width: 44px; height: 44px; border-radius: 50%;
   border: 1px solid var(--border); background: var(--bg); color: var(--text);
 }
-.mood-btn:hover { background: var(--accent); color: #1B120A; box-shadow: var(--glow); }
+.mood-btn:hover { background: var(--accent); color: #FFF4EE; box-shadow: var(--glow); }
 .mood-actions { display: flex; gap: 8px; justify-content: center; }
 
 .chat-done { margin: auto; text-align: center; padding: 24px; max-width: 440px; }
@@ -156,8 +163,8 @@ button { font: inherit; cursor: pointer; }
 .mood-chart { width: 100%; max-width: 480px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; }
 .gridline { stroke: var(--border); stroke-width: 1; }
 .axis-label { fill: var(--muted); font-size: 10px; }
-.mood-line { stroke: var(--accent); stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; filter: drop-shadow(0 0 3px rgba(232, 131, 58, 0.45)); }
-.mood-dot { fill: var(--accent); }
+.mood-line { stroke: var(--accent); stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; filter: drop-shadow(0 0 4px rgba(254, 113, 51, 0.55)); }
+.mood-dot { fill: var(--accent-bright); }
 
 .stats { display: flex; gap: 24px; margin: 16px 0; }
 .stat { display: flex; flex-direction: column; align-items: center; }
@@ -167,11 +174,11 @@ button { font: inherit; cursor: pointer; }
 .mood-list li { display: flex; align-items: center; gap: 10px; padding: 8px 0; }
 .mood-list .muted { flex: 0 0 auto; width: 120px; }
 .mood-bar { flex: 1; height: 8px; background: var(--accent-soft); border-radius: 4px; overflow: hidden; }
-.mood-fill { display: block; height: 100%; background: linear-gradient(90deg, var(--accent-deep), var(--accent)); border-radius: 4px; }
+.mood-fill { display: block; height: 100%; background: linear-gradient(90deg, var(--accent-deep), var(--accent-bright)); border-radius: 4px; }
 
 /* ---------- tab bar ---------- */
 .tabbar {
-  display: flex; border-top: 1px solid var(--border); background: var(--surface);
+  display: flex; border-top: 1px solid var(--border); background: var(--raised);
   padding-bottom: env(safe-area-inset-bottom);
 }
 .tab {
@@ -179,8 +186,10 @@ button { font: inherit; cursor: pointer; }
   background: none; border: none; padding: 10px 0 8px; min-height: 52px; color: var(--muted);
   border-radius: 12px 12px 0 0;
 }
-.tab.active { color: var(--accent); text-shadow: 0 0 10px rgba(232, 131, 58, 0.4); }
-.tab-icon { font-size: 1.2rem; }
+.tab.active { color: var(--accent-bright); text-shadow: 0 0 12px rgba(254, 113, 51, 0.5); }
+.tab-icon { font-size: 1.2rem; display: flex; }
+.tab-icon svg { width: 22px; height: 22px; }
+.tab.active .tab-icon svg { filter: drop-shadow(0 0 5px rgba(254, 113, 51, 0.55)); }
 .tab-label { font-size: 0.72rem; }
 
 /* ---------- lock screen ---------- */
@@ -199,6 +208,6 @@ button { font: inherit; cursor: pointer; }
   text-align: center; letter-spacing: 0.1em;
 }
 .lock-form input::placeholder { color: var(--muted); letter-spacing: normal; }
-.lock-form input:focus { outline: 1px solid var(--accent-deep); border-color: var(--accent-deep); }
+.lock-form input:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
 .lock-message { color: var(--muted); font-style: italic; font-size: 0.92rem; }
 .topbar-actions { display: flex; align-items: center; }

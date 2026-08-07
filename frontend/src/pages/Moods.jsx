@@ -12,8 +12,8 @@ function MoodChart({ entries }) {
          aria-label="Warmth over time">
       <defs>
         <linearGradient id="emberFill" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#E8833A" stopOpacity="0.35" />
-          <stop offset="100%" stopColor="#E8833A" stopOpacity="0" />
+          <stop offset="0%" stopColor="#FE7133" stopOpacity="0.45" />
+          <stop offset="100%" stopColor="#F75629" stopOpacity="0" />
         </linearGradient>
       </defs>
       {n > 1 && (

@@ -4,8 +4,8 @@
   "description": "still here, still warm",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#16130F",
-  "theme_color": "#16130F",
+  "background_color": "#241A15",
+  "theme_color": "#241A15",
   "icons": [
     {
       "src": "/icon.svg",

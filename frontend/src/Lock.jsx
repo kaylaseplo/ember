@@ -32,14 +32,14 @@ export default function Lock({ onUnlock }) {
       <svg viewBox="0 0 128 128" className="lock-icon" aria-hidden="true">
         <defs>
           <radialGradient id="lockGlow" cx="50%" cy="50%" r="50%">
-            <stop offset="0%" stopColor="#E8833A" stopOpacity="0.55" />
-            <stop offset="60%" stopColor="#E8833A" stopOpacity="0.18" />
-            <stop offset="100%" stopColor="#E8833A" stopOpacity="0" />
+            <stop offset="0%" stopColor="#FE7133" stopOpacity="0.7" />
+            <stop offset="55%" stopColor="#F75629" stopOpacity="0.25" />
+            <stop offset="100%" stopColor="#F75629" stopOpacity="0" />
           </radialGradient>
           <radialGradient id="lockCoal" cx="42%" cy="38%" r="70%">
-            <stop offset="0%" stopColor="#FFB877" />
-            <stop offset="55%" stopColor="#E8833A" />
-            <stop offset="100%" stopColor="#C2551B" />
+            <stop offset="0%" stopColor="#FFA36B" />
+            <stop offset="55%" stopColor="#FE7133" />
+            <stop offset="100%" stopColor="#D63C23" />
           </radialGradient>
         </defs>
         <circle cx="64" cy="64" r="52" fill="url(#lockGlow)" />

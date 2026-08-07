@@ -6,11 +6,31 @@ import Summaries from './pages/Summaries.jsx'
 import Lock from './Lock.jsx'
 import { getSession, logout } from './api.js'
 
+// Monochrome line-art icons; stroke follows the tab's text color.
+const icon = (paths) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"
+       strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    {paths}
+  </svg>
+)
+
 const TABS = [
-  { id: 'chat', label: 'Chat', icon: '💬' },
-  { id: 'history', label: 'Entries', icon: '📖' },
-  { id: 'moods', label: 'Moods', icon: '📈' },
-  { id: 'summaries', label: 'Insights', icon: '✨' },
+  {
+    id: 'chat', label: 'Chat',
+    icon: icon(<path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.3c-1.5 0-2.9-.35-4.1-.97L3 20l1.2-4.3a8 8 0 0 1-1.2-4.2A8.4 8.4 0 0 1 11.5 3.2 8.4 8.4 0 0 1 21 11.5z" />),
+  },
+  {
+    id: 'history', label: 'Entries',
+    icon: icon(<><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V4H6.5A2.5 2.5 0 0 0 4 6.5v13z" /><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5" /></>),
+  },
+  {
+    id: 'moods', label: 'Moods',
+    icon: icon(<path d="M3 16.5l5-5 4 3.5 8-8.5" />),
+  },
+  {
+    id: 'summaries', label: 'Insights',
+    icon: icon(<><path d="M12 3v3M12 18v3M3 12h3M18 12h3" /><circle cx="12" cy="12" r="4" /></>),
+  },
 ]
 
 export default function App() {

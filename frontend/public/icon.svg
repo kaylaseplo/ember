@@ -1,17 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
   <defs>
     <radialGradient id="glow" cx="50%" cy="50%" r="50%">
-      <stop offset="0%" stop-color="#E8833A" stop-opacity="0.55"/>
-      <stop offset="60%" stop-color="#E8833A" stop-opacity="0.18"/>
-      <stop offset="100%" stop-color="#E8833A" stop-opacity="0"/>
+      <stop offset="0%" stop-color="#FE7133" stop-opacity="0.7"/>
+      <stop offset="55%" stop-color="#F75629" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#F75629" stop-opacity="0"/>
     </radialGradient>
     <radialGradient id="coal" cx="42%" cy="38%" r="70%">
-      <stop offset="0%" stop-color="#FFB877"/>
-      <stop offset="55%" stop-color="#E8833A"/>
-      <stop offset="100%" stop-color="#C2551B"/>
+      <stop offset="0%" stop-color="#FFA36B"/>
+      <stop offset="55%" stop-color="#FE7133"/>
+      <stop offset="100%" stop-color="#D63C23"/>
     </radialGradient>
   </defs>
-  <rect width="128" height="128" rx="28" fill="#16130F"/>
+  <rect width="128" height="128" rx="28" fill="#241A15"/>
   <circle cx="64" cy="64" r="52" fill="url(#glow)"/>
   <circle cx="64" cy="64" r="22" fill="url(#coal)"/>
 </svg>
