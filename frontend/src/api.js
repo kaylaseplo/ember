@@ -77,6 +77,44 @@ export async function endSession(conversationId, mood) {
   return res.json()
 }
 
+export const getTherapySessions = () => getJson('/api/therapy-sessions')
+export async function addTherapySession(date) {
+  const res = await fetch('/api/therapy-sessions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ date }),
+  })
+  checkAuth(res)
+  if (!res.ok) throw new Error('save failed')
+  return res.json()
+}
+
+export const getDigests = () => getJson('/api/digests')
+
+// Streams the digest text; onChunk receives the accumulated text.
+export async function generateDigest(rangeStart, rangeEnd, onChunk) {
+  const res = await fetch('/api/digests', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rangeStart, rangeEnd }),
+  })
+  checkAuth(res)
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}))
+    throw new Error(data.error || `digest failed (${res.status})`)
+  }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let full = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    full += decoder.decode(value, { stream: true })
+    onChunk(full)
+  }
+  return full
+}
+
 const getJson = (url) => fetch(url).then(checkAuth).then(r => r.json())
 
 export const getConversations = () => getJson('/api/conversations')

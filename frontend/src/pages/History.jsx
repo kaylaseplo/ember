@@ -13,7 +13,12 @@ export default function History() {
         <button className="ghost back" onClick={() => setOpen(null)}>← Back</button>
         <h2>{open.date}</h2>
         {open.mood && <p className="muted">Mood: {open.mood}/10</p>}
-        {open.summary && <p className="summary-text">{open.summary}</p>}
+        {open.summary && (
+          <div className="summary-block">
+            <span className="summary-label">Summary</span>
+            <p className="summary-text">{open.summary}</p>
+          </div>
+        )}
         <div className="messages readonly">
           {open.messages.map((m, i) => (
             <div key={i} className={`bubble ${m.role}`}>{m.content}</div>

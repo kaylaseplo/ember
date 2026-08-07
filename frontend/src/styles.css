@@ -301,3 +301,43 @@ button { font: inherit; cursor: pointer; }
   padding: 11px 14px; min-height: 44px; border-radius: 10px; font-size: 0.95rem;
 }
 .menu-panel button:hover { background: var(--surface); color: var(--accent-bright); }
+
+/* ---------- entry summary block ---------- */
+.summary-block {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 14px; padding: 12px 16px; margin: 10px 0 14px;
+}
+.summary-label {
+  display: block; color: var(--muted); font-size: 0.78rem;
+  letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 4px;
+}
+
+/* ---------- therapy prep ---------- */
+.preset-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.preset {
+  background: var(--surface); border: 1px solid var(--border); color: var(--text);
+  border-radius: 18px; padding: 10px 14px; min-height: 44px; font-size: 0.9rem;
+}
+.preset.active {
+  border-color: var(--accent); color: var(--accent-bright);
+  box-shadow: var(--glow);
+}
+.date-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+.date-row input[type="date"] {
+  background: var(--surface); border: 1px solid var(--border); color: var(--text);
+  border-radius: 12px; padding: 10px 12px; font: inherit; font-size: 0.95rem; min-height: 44px;
+  color-scheme: dark;
+}
+.app.light .date-row input[type="date"] { color-scheme: light; }
+.gen-row { margin: 12px 0; }
+.gen-row .primary { min-height: 44px; }
+.gen-row p { margin-bottom: 8px; }
+.gen-message { font-style: italic; margin: 8px 0; }
+.therapy-date {
+  border-top: 1px solid var(--border); margin-top: 18px; padding-top: 14px;
+}
+
+/* ---------- digest view ---------- */
+.digest h3 { color: var(--accent-bright); margin: 20px 0 8px; font-weight: normal; }
+.digest .summary-text { line-height: 1.75; }
+.digest-head { display: flex; justify-content: space-between; margin-bottom: 12px; }

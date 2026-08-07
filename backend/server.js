@@ -271,6 +271,23 @@ async function initDb() {
   if (!hadEndedAt) {
     await db.query('UPDATE conversations SET ended_at = created_at WHERE ended_at IS NULL')
   }
+  await db.query(`CREATE TABLE IF NOT EXISTS therapy_sessions (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    session_date DATE NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`)
+  await db.query('CREATE INDEX IF NOT EXISTS therapy_sessions_user_id_idx ON therapy_sessions (user_id)')
+  await db.query(`CREATE TABLE IF NOT EXISTS digests (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    range_start DATE NOT NULL,
+    range_end DATE NOT NULL,
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (user_id, range_start, range_end)
+  )`)
+  await db.query('CREATE INDEX IF NOT EXISTS digests_user_id_idx ON digests (user_id)')
 }
 
 // ---------- helpers ----------
@@ -549,6 +566,152 @@ app.get('/api/summaries', async (req, res) => {
     }
   }
   res.json({ sessions: sessions.reverse(), patterns })
+})
+
+// ---------- therapy prep ----------
+
+// Distinct from the conversational system prompt — this one describes
+// patterns across a range of sessions for the user to bring to therapy.
+const DIGEST_PROMPT = `You are preparing a pre-therapy digest from someone's private journal
+sessions. They will read it in a waiting room before an appointment. Write in second
+person, plainly and specifically, referencing what they actually said. Rules:
+- No clinical language, no diagnostic framing, no advice about what they should do.
+- Describe patterns; do not interpret the person or speculate about causes.
+- No exclamation marks. Short sentences. Quiet, warm, direct.
+
+Structure the digest with exactly these four markdown sections:
+
+## What came up most
+Recurring themes, situations, and people, with a sense of how often each appeared.
+
+## What shifted
+Anything that changed across the range: a softening, a new realization, something
+that got harder. If nothing clearly shifted, say so plainly.
+
+## Mood
+The trajectory in plain language, and what was going on around the lowest and
+highest points. Do not just restate numbers.
+
+## Worth raising
+3 to 5 concrete things that might be useful to bring to a therapist, phrased as
+observations rather than advice.`
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+
+// GET recorded therapy dates (newest first)
+app.get('/api/therapy-sessions', async (req, res) => {
+  const { rows } = await db.query(
+    'SELECT id, session_date FROM therapy_sessions WHERE user_id = $1 ORDER BY session_date DESC',
+    [req.userId]
+  )
+  res.json(rows.map((r) => ({ id: r.id, date: r.session_date.toISOString().slice(0, 10) })))
+})
+
+app.post('/api/therapy-sessions', async (req, res) => {
+  const { date } = req.body || {}
+  if (typeof date !== 'string' || !DATE_RE.test(date)) {
+    return res.status(400).json({ error: 'date must be YYYY-MM-DD' })
+  }
+  const { rows } = await db.query(
+    'INSERT INTO therapy_sessions (user_id, session_date) VALUES ($1, $2) RETURNING id, session_date',
+    [req.userId, date]
+  )
+  res.json({ id: rows[0].id, date: rows[0].session_date.toISOString().slice(0, 10) })
+})
+
+// Past digests, most recent first
+app.get('/api/digests', async (req, res) => {
+  const { rows } = await db.query(
+    'SELECT id, range_start, range_end, content, created_at FROM digests WHERE user_id = $1 ORDER BY created_at DESC',
+    [req.userId]
+  )
+  res.json(
+    rows.map((r) => ({
+      id: r.id,
+      rangeStart: r.range_start.toISOString().slice(0, 10),
+      rangeEnd: r.range_end.toISOString().slice(0, 10),
+      content: r.content,
+      createdAt: r.created_at.toISOString(),
+    }))
+  )
+})
+
+// Generate (or regenerate) a digest for a date range. Streams the digest text
+// as it generates, then stores it — regenerating the same range replaces the
+// stored copy.
+app.post('/api/digests', async (req, res) => {
+  const { rangeStart, rangeEnd } = req.body || {}
+  if (
+    typeof rangeStart !== 'string' || !DATE_RE.test(rangeStart) ||
+    typeof rangeEnd !== 'string' || !DATE_RE.test(rangeEnd) ||
+    rangeStart > rangeEnd
+  ) {
+    return res.status(400).json({ error: 'invalid range' })
+  }
+
+  const { rows: convos } = await db.query(
+    `SELECT id, created_at, mood, summary, messages FROM conversations
+     WHERE user_id = $1 AND ended_at IS NOT NULL
+       AND created_at::date >= $2::date AND created_at::date <= $3::date
+     ORDER BY created_at`,
+    [req.userId, rangeStart, rangeEnd]
+  )
+  if (convos.length < 2) {
+    return res.status(400).json({ error: "There isn't enough in that range yet." })
+  }
+
+  // Small ranges get full transcripts; larger ones lean on the stored
+  // summaries to keep the request manageable.
+  const useTranscripts = convos.length <= 6
+  const sessionsText = convos
+    .map((c) => {
+      const head = `Session on ${fmtDate(c.created_at)}` +
+        (c.mood ? ` (mood ${c.mood}/10)` : ' (no mood recorded)')
+      if (useTranscripts) {
+        const body = c.messages
+          .map((m) => `${m.role === 'user' ? 'Them' : 'Ember'}: ${m.content}`)
+          .join('\n')
+        return `${head}\n${body}`
+      }
+      return `${head}\nSummary: ${c.summary || '(no summary saved)'}`
+    })
+    .join('\n\n---\n\n')
+
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+  let acc = ''
+  try {
+    const stream = client.messages.stream({
+      model: MODEL,
+      max_tokens: 2048,
+      system: DIGEST_PROMPT,
+      thinking: { type: 'adaptive' },
+      messages: [{
+        role: 'user',
+        content:
+          `My sessions from ${rangeStart} to ${rangeEnd}` +
+          (useTranscripts ? ' (full transcripts):\n\n' : ' (session summaries):\n\n') +
+          sessionsText +
+          '\n\nPlease write the digest now.',
+      }],
+    })
+    stream.on('text', (text) => {
+      acc += text
+      res.write(text)
+    })
+    await stream.finalMessage()
+    if (acc.trim()) {
+      await db.query(
+        `INSERT INTO digests (user_id, range_start, range_end, content)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (user_id, range_start, range_end)
+         DO UPDATE SET content = EXCLUDED.content, created_at = now()`,
+        [req.userId, rangeStart, rangeEnd, acc]
+      )
+    }
+  } catch (err) {
+    res.write(`\n[error] ${err instanceof Anthropic.APIError ? 'API error: ' : ''}${err.message || err}`)
+  }
+  res.end()
 })
 
 // Serve the built frontend (single-service deployment). Registered last so /api wins.
