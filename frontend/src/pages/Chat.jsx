@@ -1,7 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { streamChat, endSession } from '../api.js'
 
-export default function Chat() {
+const FIRST_OPENERS = [
+  "I don't know where to start",
+  'Something happened today',
+  "I've been feeling off and I'm not sure why",
+]
+
+export default function Chat({ firstTime = false, onSessionSaved }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
@@ -15,8 +21,8 @@ export default function Chat() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages, partial])
 
-  async function send() {
-    const text = input.trim()
+  async function send(textArg) {
+    const text = (typeof textArg === 'string' ? textArg : input).trim()
     if (!text || streaming) return
     const next = [...messages, { role: 'user', content: text }]
     setMessages(next)
@@ -38,6 +44,7 @@ export default function Chat() {
     setSaving(true)
     try {
       const res = await endSession(messages, mood)
+      onSessionSaved?.()
       setSavedSummary(res.summary || 'Session saved.')
       setMessages([])
       setEnding(false)
@@ -67,6 +74,15 @@ export default function Chat() {
           <div className="welcome">
             <h2>Welcome back.</h2>
             <p className="tagline">still here, still warm</p>
+            {firstTime && (
+              <div className="openers">
+                {FIRST_OPENERS.map(t => (
+                  <button key={t} className="opener" onClick={() => send(t)}>
+                    {t}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
         {messages.map((m, i) => (
@@ -107,7 +123,7 @@ export default function Chat() {
             placeholder="What's on your mind?"
             rows={1}
           />
-          <button className="primary send" onClick={send} disabled={streaming || !input.trim()}>
+          <button className="primary send" onClick={() => send()} disabled={streaming || !input.trim()}>
             ↑
           </button>
           {messages.length > 0 && !streaming && (

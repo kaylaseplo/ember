@@ -33,6 +33,8 @@ export const login = (email, password) => authPost('/api/auth/login', { email, p
 export const signup = (email, password, inviteCode) =>
   authPost('/api/auth/signup', { email, password, inviteCode })
 export const logout = () => fetch('/api/auth/logout', { method: 'POST' })
+export const completeOnboarding = () =>
+  fetch('/api/onboarding/complete', { method: 'POST' }).catch(() => {})
 
 export async function streamChat(messages, onChunk) {
   const res = await fetch('/api/chat', {

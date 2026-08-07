@@ -4,7 +4,8 @@ import History from './pages/History.jsx'
 import Moods from './pages/Moods.jsx'
 import Summaries from './pages/Summaries.jsx'
 import Login from './Login.jsx'
-import { getMe, logout } from './api.js'
+import Onboarding from './Onboarding.jsx'
+import { getMe, logout, completeOnboarding } from './api.js'
 
 // Monochrome line-art icons; stroke follows the tab's text color.
 const icon = (paths) => (
@@ -37,39 +38,62 @@ export default function App() {
   const [tab, setTab] = useState('chat')
   // Warm dark is Ember's default; light is the alternate.
   const [light, setLight] = useState(false)
-  const [authed, setAuthed] = useState(null) // null = checking
+  const [user, setUser] = useState(undefined) // undefined = checking, null = signed out
+  const [showOnboarding, setShowOnboarding] = useState(false)
 
   useEffect(() => {
-    getMe().then(user => setAuthed(!!user))
+    getMe().then(u => {
+      setUser(u)
+      if (u && !u.onboardingCompletedAt) setShowOnboarding(true)
+    })
   }, [])
 
   // A 401 mid-session (expired cookie) drops back to the lock screen. The app
   // tree below stays mounted (just hidden), so chat text in progress survives.
   useEffect(() => {
-    const onLocked = () => setAuthed(false)
+    const onLocked = () => setUser(null)
     window.addEventListener('ember:locked', onLocked)
     return () => window.removeEventListener('ember:locked', onLocked)
   }, [])
 
   async function signOut() {
     await logout()
-    setAuthed(false)
+    setUser(null)
+    setShowOnboarding(false)
   }
 
-  if (authed === null) return <div className="app" />
+  function signedIn(u) {
+    setUser(u)
+    if (!u.onboardingCompletedAt) setShowOnboarding(true)
+  }
 
-  const locked = !authed
+  function finishOnboarding() {
+    setShowOnboarding(false)
+    // Mark complete server-side (no-op if already completed — replays included)
+    completeOnboarding()
+    setUser(u => (u ? { ...u, onboardingCompletedAt: u.onboardingCompletedAt || new Date().toISOString() } : u))
+  }
+
+  if (user === undefined) return <div className="app" />
+
+  const locked = !user
+  const veiled = locked || showOnboarding
 
   return (
     <div className={`app ${light ? 'light' : ''}`}>
-      {locked && <Login onSignedIn={() => setAuthed(true)} />}
+      {locked && <Login onSignedIn={signedIn} />}
+      {!locked && showOnboarding && <Onboarding onDone={finishOnboarding} />}
 
-      <header className="topbar" style={locked ? { display: 'none' } : undefined}>
+      <header className="topbar" style={veiled ? { display: 'none' } : undefined}>
         <span className="brand">Ember</span>
         <span className="topbar-actions">
           <button className="theme-toggle" onClick={() => setLight(l => !l)}
                   aria-label="Toggle light mode">
             {light ? '🌙' : '☀️'}
+          </button>
+          <button className="theme-toggle signout" onClick={() => setShowOnboarding(true)}
+                  aria-label="Replay the introduction">
+            Intro
           </button>
           <button className="theme-toggle signout" onClick={signOut} aria-label="Sign out">
             Sign out
@@ -77,15 +101,18 @@ export default function App() {
         </span>
       </header>
 
-      <main className="content" style={locked ? { display: 'none' } : undefined}>
+      <main className="content" style={veiled ? { display: 'none' } : undefined}>
         {/* Chat stays mounted so an in-progress conversation survives tab switches */}
-        <div style={{ display: tab === 'chat' ? 'contents' : 'none' }}><Chat /></div>
+        <div style={{ display: tab === 'chat' ? 'contents' : 'none' }}>
+          <Chat firstTime={!user?.hasConversations}
+                onSessionSaved={() => setUser(u => (u ? { ...u, hasConversations: true } : u))} />
+        </div>
         {tab === 'history' && <History />}
         {tab === 'moods' && <Moods />}
         {tab === 'summaries' && <Summaries />}
       </main>
 
-      <nav className="tabbar" style={locked ? { display: 'none' } : undefined}>
+      <nav className="tabbar" style={veiled ? { display: 'none' } : undefined}>
         {TABS.map(t => (
           <button key={t.id}
                   className={`tab ${tab === t.id ? 'active' : ''}`}

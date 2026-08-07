@@ -117,6 +117,21 @@ function authRateLimited(route, ip) {
 
 const normalizeEmail = (email) => String(email).trim().toLowerCase()
 
+// Session-user payload shared by signup/login/me. hasConversations drives the
+// one-time first-chat nudge; onboardingCompletedAt drives first-run onboarding.
+async function userPayload(u) {
+  const { rows } = await db.query(
+    'SELECT EXISTS(SELECT 1 FROM conversations WHERE user_id = $1) AS has', [u.id]
+  )
+  return {
+    id: u.id,
+    email: u.email,
+    displayName: u.display_name,
+    onboardingCompletedAt: u.onboarding_completed_at || null,
+    hasConversations: rows[0].has,
+  }
+}
+
 // Hash of a throwaway password, compared against when the email doesn't
 // exist so both failure paths cost a bcrypt verify (no timing leak).
 const DUMMY_HASH = bcrypt.hashSync(crypto.randomBytes(24).toString('hex'), BCRYPT_COST)
@@ -141,11 +156,11 @@ app.post('/api/auth/signup', async (req, res) => {
   const hash = await bcrypt.hash(password, BCRYPT_COST)
   try {
     const { rows } = await db.query(
-      'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email, display_name',
+      'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email, display_name, onboarding_completed_at',
       [normalizeEmail(email), hash]
     )
     setSession(res, rows[0].id)
-    res.json({ user: { id: rows[0].id, email: rows[0].email, displayName: rows[0].display_name } })
+    res.json({ user: await userPayload(rows[0]) })
   } catch (err) {
     if (err.code === '23505') {
       return res.status(400).json({ error: 'That email already has an account — try signing in.' })
@@ -162,7 +177,7 @@ app.post('/api/auth/login', async (req, res) => {
   const user =
     typeof email === 'string'
       ? (await db.query(
-          'SELECT id, email, password_hash, display_name FROM users WHERE email = $1',
+          'SELECT id, email, password_hash, display_name, onboarding_completed_at FROM users WHERE email = $1',
           [normalizeEmail(email)]
         )).rows[0]
       : undefined
@@ -173,7 +188,7 @@ app.post('/api/auth/login', async (req, res) => {
     return res.status(401).json({ error: "That email and password don't match." })
   }
   setSession(res, user.id)
-  res.json({ user: { id: user.id, email: user.email, displayName: user.display_name } })
+  res.json({ user: await userPayload(user) })
 })
 
 app.post('/api/auth/logout', (req, res) => {
@@ -185,10 +200,10 @@ app.get('/api/auth/me', async (req, res) => {
   const userId = authUserId(req)
   if (!userId) return res.status(401).json({ error: 'unauthorized' })
   const { rows } = await db.query(
-    'SELECT id, email, display_name FROM users WHERE id = $1', [userId]
+    'SELECT id, email, display_name, onboarding_completed_at FROM users WHERE id = $1', [userId]
   )
   if (rows.length === 0) return res.status(401).json({ error: 'unauthorized' })
-  res.json({ user: { id: rows[0].id, email: rows[0].email, displayName: rows[0].display_name } })
+  res.json({ user: await userPayload(rows[0]) })
 })
 
 // Everything else under /api requires a valid session; handlers use req.userId.
@@ -197,6 +212,14 @@ app.use('/api', (req, res, next) => {
   if (!userId) return res.status(401).json({ error: 'unauthorized' })
   req.userId = userId
   next()
+})
+
+app.post('/api/onboarding/complete', async (req, res) => {
+  await db.query(
+    'UPDATE users SET onboarding_completed_at = now() WHERE id = $1 AND onboarding_completed_at IS NULL',
+    [req.userId]
+  )
+  res.json({ ok: true })
 })
 
 // ---------- database ----------
@@ -215,8 +238,10 @@ async function initDb() {
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     display_name TEXT,
+    onboarding_completed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`)
+  await db.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_completed_at TIMESTAMPTZ')
   await db.query(`CREATE TABLE IF NOT EXISTS conversations (
     id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
