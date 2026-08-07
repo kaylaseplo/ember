@@ -36,14 +36,15 @@ export const logout = () => fetch('/api/auth/logout', { method: 'POST' })
 export const completeOnboarding = () =>
   fetch('/api/onboarding/complete', { method: 'POST' }).catch(() => {})
 
-export async function streamChat(messages, onChunk) {
+export async function streamChat(messages, conversationId, onChunk) {
   const res = await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify({ messages, conversationId }),
   })
   checkAuth(res)
   if (!res.ok) throw new Error(`chat failed (${res.status})`)
+  const newConversationId = Number(res.headers.get('X-Conversation-Id')) || conversationId
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let full = ''
@@ -54,14 +55,22 @@ export async function streamChat(messages, onChunk) {
     full += text
     onChunk(full)
   }
-  return full
+  return { reply: full, conversationId: newConversationId }
 }
 
-export async function endSession(messages, mood) {
+export async function getOpenConversation() {
+  const res = await fetch('/api/conversations/open')
+  checkAuth(res)
+  if (!res.ok) return null
+  const data = await res.json()
+  return data.conversation
+}
+
+export async function endSession(conversationId, mood) {
   const res = await fetch('/api/end-session', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages, mood }),
+    body: JSON.stringify({ conversationId, mood }),
   })
   checkAuth(res)
   if (!res.ok) throw new Error(`save failed (${res.status})`)

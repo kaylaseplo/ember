@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { streamChat, endSession } from '../api.js'
+import { streamChat, endSession, getOpenConversation } from '../api.js'
 
 const FIRST_OPENERS = [
   "I don't know where to start",
@@ -7,8 +7,10 @@ const FIRST_OPENERS = [
   "I've been feeling off and I'm not sure why",
 ]
 
-export default function Chat({ firstTime = false, onSessionSaved }) {
+export default function Chat({ firstTime = false, userId, onSessionSaved }) {
   const [messages, setMessages] = useState([])
+  const [conversationId, setConversationId] = useState(null)
+  const [resumeChecked, setResumeChecked] = useState(false)
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [partial, setPartial] = useState(null)
@@ -21,6 +23,25 @@ export default function Chat({ firstTime = false, onSessionSaved }) {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages, partial])
 
+  // On sign-in, pick up any open conversation so nothing typed earlier is
+  // lost — but never clobber messages already on screen (e.g. after a 401
+  // and re-login mid-conversation).
+  useEffect(() => {
+    if (!userId) return
+    let cancelled = false
+    getOpenConversation()
+      .then(conv => {
+        if (cancelled) return
+        if (conv) {
+          setConversationId(id => id ?? conv.id)
+          setMessages(m => (m.length === 0 ? conv.messages : m))
+        }
+      })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setResumeChecked(true) })
+    return () => { cancelled = true }
+  }, [userId])
+
   async function send(textArg) {
     const text = (typeof textArg === 'string' ? textArg : input).trim()
     if (!text || streaming) return
@@ -30,7 +51,8 @@ export default function Chat({ firstTime = false, onSessionSaved }) {
     setStreaming(true)
     setPartial('')
     try {
-      const reply = await streamChat(next, setPartial)
+      const { reply, conversationId: convId } = await streamChat(next, conversationId, setPartial)
+      if (convId) setConversationId(convId)
       setMessages([...next, { role: 'assistant', content: reply }])
     } catch (e) {
       setMessages([...next, { role: 'assistant', content: `(Something went wrong: ${e.message}. Your message wasn't lost — try sending again.)` }])
@@ -43,15 +65,32 @@ export default function Chat({ firstTime = false, onSessionSaved }) {
   async function saveSession(mood) {
     setSaving(true)
     try {
-      const res = await endSession(messages, mood)
+      const res = await endSession(conversationId, mood)
       onSessionSaved?.()
       setSavedSummary(res.summary || 'Session saved.')
       setMessages([])
+      setConversationId(null)
       setEnding(false)
     } catch (e) {
       alert(`Couldn't save: ${e.message}`)
     } finally {
       setSaving(false)
+    }
+  }
+
+  // Quiet escape hatch: close the current conversation (no mood) and start
+  // fresh. The old one still lands in Entries.
+  async function startOver() {
+    if (streaming || !conversationId) return
+    const convId = conversationId
+    setMessages([])
+    setConversationId(null)
+    setEnding(false)
+    try {
+      await endSession(convId, null)
+      onSessionSaved?.()
+    } catch {
+      // already reset locally; the open row will be auto-closed later if stale
     }
   }
 
@@ -70,7 +109,7 @@ export default function Chat({ firstTime = false, onSessionSaved }) {
   return (
     <div className="chat">
       <div className="messages" ref={scrollRef}>
-        {messages.length === 0 && !partial && (
+        {messages.length === 0 && !partial && resumeChecked && (
           <div className="welcome">
             <h2>Welcome back.</h2>
             <p className="tagline">still here, still warm</p>
@@ -128,6 +167,9 @@ export default function Chat({ firstTime = false, onSessionSaved }) {
           </button>
           {messages.length > 0 && !streaming && (
             <button className="ghost end" onClick={() => setEnding(true)}>End</button>
+          )}
+          {messages.length > 0 && !streaming && (
+            <button className="startover" onClick={startOver}>Start over</button>
           )}
         </div>
       )}

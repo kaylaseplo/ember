@@ -104,7 +104,7 @@ export default function App() {
       <main className="content" style={veiled ? { display: 'none' } : undefined}>
         {/* Chat stays mounted so an in-progress conversation survives tab switches */}
         <div style={{ display: tab === 'chat' ? 'contents' : 'none' }}>
-          <Chat firstTime={!user?.hasConversations}
+          <Chat firstTime={!user?.hasConversations} userId={user?.id}
                 onSessionSaved={() => setUser(u => (u ? { ...u, hasConversations: true } : u))} />
         </div>
         {tab === 'history' && <History />}

@@ -246,6 +246,8 @@ async function initDb() {
     id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ended_at TIMESTAMPTZ,
     mood INTEGER,
     summary TEXT,
     messages JSONB NOT NULL
@@ -257,6 +259,18 @@ async function initDb() {
     'ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE'
   )
   await db.query('CREATE INDEX IF NOT EXISTS conversations_user_id_idx ON conversations (user_id)')
+  // Open/ended status. On databases from before this column existed, every row
+  // was saved via End — backfill them as ended exactly once (when the column
+  // is first added), so a routine boot never closes a genuinely open chat.
+  const { rows: [{ exists: hadEndedAt }] } = await db.query(
+    `SELECT EXISTS(SELECT 1 FROM information_schema.columns
+      WHERE table_name = 'conversations' AND column_name = 'ended_at') AS exists`
+  )
+  await db.query('ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ended_at TIMESTAMPTZ')
+  await db.query('ALTER TABLE conversations ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()')
+  if (!hadEndedAt) {
+    await db.query('UPDATE conversations SET ended_at = created_at WHERE ended_at IS NULL')
+  }
 }
 
 // ---------- helpers ----------
@@ -302,57 +316,10 @@ function fmtDate(d) {
 
 const withDate = ({ created_at, ...row }) => ({ ...row, date: fmtDate(created_at) })
 
-const textOf = (resp) =>
-  resp.content
-    .filter((b) => b.type === 'text')
-    .map((b) => b.text)
-    .join('')
-    .trim()
-
-// ---------- endpoints ----------
-
-app.post('/api/chat', async (req, res) => {
-  const { messages } = req.body || {}
-  if (!validMessages(messages)) {
-    return res.status(400).json({ error: 'messages must not be empty' })
-  }
-  const system = loadSystemPrompt() + (await recentContext(req.userId))
-
-  res.setHeader('Content-Type', 'text/plain; charset=utf-8')
-  try {
-    const stream = client.messages.stream({
-      model: MODEL,
-      max_tokens: 2048,
-      system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
-      thinking: { type: 'adaptive' },
-      messages,
-    })
-    stream.on('text', (text) => res.write(text))
-    await stream.finalMessage()
-    res.end()
-  } catch (err) {
-    if (err instanceof Anthropic.AuthenticationError) {
-      res.write('\n[error] Authentication failed — check ANTHROPIC_API_KEY on the server.')
-    } else if (err instanceof Anthropic.RateLimitError) {
-      res.write('\n[error] Rate limited — wait a moment and try again.')
-    } else if (err instanceof Anthropic.APIError) {
-      res.write(`\n[error] API error: ${err.message}`)
-    } else {
-      res.write(`\n[error] ${err.message || err}`)
-    }
-    res.end()
-  }
-})
-
-app.post('/api/end-session', async (req, res) => {
-  const { messages, mood: rawMood } = req.body || {}
-  if (!validMessages(messages)) {
-    return res.status(400).json({ error: 'no conversation to save' })
-  }
-  const mood =
-    Number.isInteger(rawMood) && rawMood >= 1 && rawMood <= 10 ? rawMood : null
-
-  let summary = ''
+// Session summary from a finished conversation; '' if the call fails — the
+// close-out must never be blocked by a failed summary.
+async function generateSummary(messages) {
+  if (!Array.isArray(messages) || messages.length < 2) return ''
   try {
     const resp = await client.messages.create({
       model: MODEL,
@@ -366,16 +333,148 @@ app.post('/api/end-session', async (req, res) => {
         { role: 'user', content: 'Please write the brief session summary now.' },
       ],
     })
-    summary = textOf(resp)
+    return textOf(resp)
   } catch {
-    // save the session even if the summary call fails
+    return ''
+  }
+}
+
+// Mark a conversation ended; summary from whatever content it has.
+async function closeConversation(convId, userId, mood) {
+  const { rows } = await db.query(
+    'SELECT id, messages FROM conversations WHERE id = $1 AND user_id = $2', [convId, userId]
+  )
+  if (rows.length === 0) return null
+  const summary = await generateSummary(rows[0].messages)
+  const { rows: [updated] } = await db.query(
+    `UPDATE conversations SET ended_at = now(), updated_at = now(), mood = $3, summary = $4
+     WHERE id = $1 AND user_id = $2 RETURNING id, created_at, mood, summary`,
+    [convId, userId, mood, summary]
+  )
+  return updated
+}
+
+const textOf = (resp) =>
+  resp.content
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text)
+    .join('')
+    .trim()
+
+// ---------- endpoints ----------
+
+app.post('/api/chat', async (req, res) => {
+  const { messages, conversationId } = req.body || {}
+  if (!validMessages(messages)) {
+    return res.status(400).json({ error: 'messages must not be empty' })
+  }
+  const system = loadSystemPrompt() + (await recentContext(req.userId))
+
+  // Persist the user's message before any model call: create the conversation
+  // row on the first message, or sync the history onto the existing open row.
+  let convId = Number.isInteger(Number(conversationId)) ? Number(conversationId) : null
+  if (convId !== null) {
+    const { rowCount } = await db.query(
+      'UPDATE conversations SET messages = $1, updated_at = now() WHERE id = $2 AND user_id = $3 AND ended_at IS NULL',
+      [JSON.stringify(messages), convId, req.userId]
+    )
+    if (rowCount === 0) convId = null // stale/foreign id — fall through to a new row
+  }
+  if (convId === null) {
+    const { rows } = await db.query(
+      'INSERT INTO conversations (user_id, messages) VALUES ($1, $2) RETURNING id',
+      [req.userId, JSON.stringify(messages)]
+    )
+    convId = rows[0].id
   }
 
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+  res.setHeader('X-Conversation-Id', String(convId))
+
+  // Accumulate the reply server-side so an interrupted stream (closed tab,
+  // killed connection) still saves whatever text arrived.
+  let acc = ''
+  let saved = false
+  const saveReply = async () => {
+    if (saved || !acc) return
+    saved = true
+    try {
+      await db.query(
+        'UPDATE conversations SET messages = $1, updated_at = now() WHERE id = $2 AND user_id = $3',
+        [JSON.stringify([...messages, { role: 'assistant', content: acc }]), convId, req.userId]
+      )
+    } catch (e) {
+      console.error('failed to persist assistant reply:', e.message)
+    }
+  }
+
+  const stream = client.messages.stream({
+    model: MODEL,
+    max_tokens: 2048,
+    system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
+    thinking: { type: 'adaptive' },
+    messages,
+  })
+  res.on('close', () => {
+    if (!res.writableFinished) stream.controller.abort() // client went away mid-stream
+  })
+  try {
+    stream.on('text', (text) => {
+      acc += text
+      res.write(text)
+    })
+    await stream.finalMessage()
+  } catch (err) {
+    if (err instanceof Anthropic.AuthenticationError) {
+      res.write('\n[error] Authentication failed — check ANTHROPIC_API_KEY on the server.')
+    } else if (err instanceof Anthropic.RateLimitError) {
+      res.write('\n[error] Rate limited — wait a moment and try again.')
+    } else if (err instanceof Anthropic.APIError) {
+      res.write(`\n[error] API error: ${err.message}`)
+    } else if (err?.name !== 'AbortError') {
+      res.write(`\n[error] ${err.message || err}`)
+    }
+  } finally {
+    await saveReply()
+    res.end()
+  }
+})
+
+// Most recent open conversation, for resuming after a reload or dropped
+// session. Anything open but idle for over 24h is closed out instead.
+app.get('/api/conversations/open', async (req, res) => {
   const { rows } = await db.query(
-    'INSERT INTO conversations (user_id, mood, summary, messages) VALUES ($1, $2, $3, $4) RETURNING id, created_at',
-    [req.userId, mood, summary, JSON.stringify(messages)]
+    'SELECT id, created_at, updated_at, messages FROM conversations WHERE user_id = $1 AND ended_at IS NULL ORDER BY id DESC',
+    [req.userId]
   )
-  res.json({ id: rows[0].id, date: fmtDate(rows[0].created_at), mood, summary })
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000
+  let resume = null
+  for (const row of rows) {
+    if (!resume && row.updated_at.getTime() >= cutoff) {
+      resume = row
+    } else {
+      await closeConversation(row.id, req.userId, null) // stale — auto-close
+    }
+  }
+  res.json({
+    conversation: resume
+      ? { id: resume.id, date: fmtDate(resume.created_at), messages: resume.messages }
+      : null,
+  })
+})
+
+app.post('/api/end-session', async (req, res) => {
+  const { conversationId, mood: rawMood } = req.body || {}
+  const convId = Number(conversationId)
+  if (!Number.isInteger(convId)) {
+    return res.status(400).json({ error: 'no conversation to save' })
+  }
+  const mood =
+    Number.isInteger(rawMood) && rawMood >= 1 && rawMood <= 10 ? rawMood : null
+
+  const closed = await closeConversation(convId, req.userId, mood)
+  if (!closed) return res.status(404).json({ error: 'conversation not found' })
+  res.json({ id: closed.id, date: fmtDate(closed.created_at), mood: closed.mood, summary: closed.summary })
 })
 
 app.get('/api/conversations', async (req, res) => {
