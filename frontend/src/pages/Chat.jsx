@@ -19,10 +19,62 @@ export default function Chat({ firstTime = false, userId, onSessionSaved, onActi
   const [savedSummary, setSavedSummary] = useState(null)
   const scrollRef = useRef(null)
   const inputRef = useRef(null)
+  const partialRef = useRef(null)       // the streaming assistant bubble
+  const positionedRef = useRef(false)   // bubble top already pinned near viewport top
+  const userScrolledRef = useRef(false) // user took over scrolling mid-stream
+  const [nearBottom, setNearBottom] = useState(true)
 
+  const updateNearBottom = () => {
+    const el = scrollRef.current
+    if (el) setNearBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 150)
+  }
+
+  const scrollToBottom = (behavior = 'smooth') => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior })
+  }
+
+  // After the user's own message: scroll down so it's visible. When an
+  // assistant message finishes (appended to messages), leave the view alone —
+  // the reader may be mid-message.
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-  }, [messages, partial])
+    if (messages[messages.length - 1]?.role === 'user') scrollToBottom()
+    else updateNearBottom()
+  }, [messages])
+
+  // While an assistant reply streams: walk the view down until the TOP of the
+  // streaming bubble sits near the top of the chat area, then stop — the user
+  // reads downward as text arrives below. Short replies never generate enough
+  // scroll room to move, so the view stays put. A manual scroll cancels this.
+  useEffect(() => {
+    if (partial === '') {
+      positionedRef.current = false
+      userScrolledRef.current = false
+      return
+    }
+    if (partial == null) return
+    // Content can grow below a frozen scroll position without firing scroll
+    // events — keep the jump-to-latest affordance in sync each chunk.
+    updateNearBottom()
+    if (positionedRef.current || userScrolledRef.current) return
+    const el = scrollRef.current
+    const bubble = partialRef.current
+    if (!el || !bubble) return
+    const target = bubble.offsetTop - 12
+    const max = el.scrollHeight - el.clientHeight
+    const next = Math.min(target, max)
+    if (next > el.scrollTop) el.scrollTop = next // instant — smooth would fight arriving tokens
+    if (next >= target) positionedRef.current = true
+  }, [partial])
+
+  function onScroll() {
+    updateNearBottom()
+  }
+
+  // Only direct input (wheel, touch) marks the user as having taken over —
+  // comparing scroll positions races with our own writes during streaming.
+  function onUserScrollIntent() {
+    if (partial != null) userScrolledRef.current = true
+  }
 
   const active = messages.length > 0
   useEffect(() => { onActiveChange?.(active) }, [active])
@@ -126,7 +178,8 @@ export default function Chat({ firstTime = false, userId, onSessionSaved, onActi
 
   return (
     <div className="chat">
-      <div className="messages" ref={scrollRef}>
+      <div className="messages" ref={scrollRef} onScroll={onScroll}
+           onWheel={onUserScrollIntent} onTouchMove={onUserScrollIntent}>
         {messages.length === 0 && !partial && resumeChecked && (
           <div className="welcome">
             <h2>Welcome back.</h2>
@@ -146,9 +199,18 @@ export default function Chat({ firstTime = false, userId, onSessionSaved, onActi
           <div key={i} className={`bubble ${m.role}`}>{m.content}</div>
         ))}
         {partial !== null && (
-          <div className="bubble assistant">{partial || <span className="typing">…</span>}</div>
+          <div className="bubble assistant" ref={partialRef}>
+            {partial || <span className="typing">…</span>}
+          </div>
         )}
       </div>
+
+      {!nearBottom && (
+        <button className="jump-latest" onClick={() => scrollToBottom()}
+                aria-label="Jump to latest">
+          ↓
+        </button>
+      )}
 
       {ending ? (
         <div className="mood-picker">

@@ -341,3 +341,14 @@ button { font: inherit; cursor: pointer; }
 .digest h3 { color: var(--accent-bright); margin: 20px 0 8px; font-weight: normal; }
 .digest .summary-text { line-height: 1.75; }
 .digest-head { display: flex; justify-content: space-between; margin-bottom: 12px; }
+
+/* jump to latest — appears only when scrolled away from the newest content */
+.chat { position: relative; }
+.messages { position: relative; }
+.jump-latest {
+  position: absolute; right: 16px; bottom: 86px; z-index: 10;
+  width: 44px; height: 44px; border-radius: 50%;
+  background: var(--raised); border: 1px solid var(--border); color: var(--muted);
+  font-size: 1.1rem; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+}
+.jump-latest:hover { color: var(--accent-bright); border-color: var(--accent-deep); }
