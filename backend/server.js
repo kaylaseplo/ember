@@ -8,7 +8,8 @@
 //   GET  /api/moods              mood history + trend
 //   GET  /api/summaries          per-session summaries + cross-session patterns
 //
-// Env: ANTHROPIC_API_KEY (required). DB lives at DATA_DIR/companion.db.
+// Env: ANTHROPIC_API_KEY, APP_PASSCODE, DATABASE_URL (all required).
+// Data lives in Postgres (DATABASE_URL — e.g. a free Neon database).
 // Serves the built React frontend from ../frontend/dist when present.
 
 import crypto from 'node:crypto'
@@ -17,17 +18,24 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import Anthropic from '@anthropic-ai/sdk'
-import Database from 'better-sqlite3'
 import cors from 'cors'
 import express from 'express'
+import pg from 'pg'
 
 const MODEL = 'claude-opus-4-8'
 const BASE_DIR = path.dirname(fileURLToPath(import.meta.url))
-const DATA_DIR = process.env.DATA_DIR || path.join(BASE_DIR, '..', 'data')
-const DB_PATH = path.join(DATA_DIR, 'companion.db')
 const SYSTEM_PROMPT_FILE = path.join(BASE_DIR, '..', 'SYSTEM_PROMPT.md')
 const FRONTEND_DIST = path.join(BASE_DIR, '..', 'frontend', 'dist')
 const PORT = process.env.PORT || 8000
+
+const DATABASE_URL = process.env.DATABASE_URL
+if (!DATABASE_URL) {
+  console.error(
+    'FATAL: DATABASE_URL is not set. Ember stores its data in Postgres — set ' +
+      'DATABASE_URL to a Postgres connection string (e.g. from Neon) and restart.'
+  )
+  process.exit(1)
+}
 
 const PASSCODE = process.env.APP_PASSCODE
 if (!PASSCODE) {
@@ -130,15 +138,23 @@ app.use('/api', (req, res, next) => {
 
 // ---------- database ----------
 
-fs.mkdirSync(DATA_DIR, { recursive: true })
-const db = new Database(DB_PATH)
-db.exec(`CREATE TABLE IF NOT EXISTS conversations (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  date TEXT NOT NULL,
-  mood INTEGER,
-  summary TEXT,
-  messages TEXT NOT NULL
-)`)
+// Small pool: single-user app on a free tier. SSL is required by Neon; local
+// dev against a plain localhost Postgres skips it.
+const db = new pg.Pool({
+  connectionString: DATABASE_URL,
+  max: 4,
+  ssl: /localhost|127\.0\.0\.1/.test(DATABASE_URL) ? false : { rejectUnauthorized: false },
+})
+
+async function initDb() {
+  await db.query(`CREATE TABLE IF NOT EXISTS conversations (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    mood INTEGER,
+    summary TEXT,
+    messages JSONB NOT NULL
+  )`)
+}
 
 // ---------- helpers ----------
 
@@ -148,16 +164,16 @@ function loadSystemPrompt() {
 }
 
 // Summaries of recent sessions, for continuity and pattern recognition.
-function recentContext(n = 3) {
-  const rows = db
-    .prepare('SELECT date, mood, summary FROM conversations ORDER BY id DESC LIMIT ?')
-    .all(n)
+async function recentContext(n = 3) {
+  const { rows } = await db.query(
+    'SELECT created_at, mood, summary FROM conversations ORDER BY id DESC LIMIT $1', [n]
+  )
   if (rows.length === 0) return ''
   const lines = rows
     .reverse()
     .map((r) => {
       const mood = r.mood ? `mood ${r.mood}/10` : 'no mood recorded'
-      return `- ${r.date} (${mood}): ${r.summary || '(no summary)'}`
+      return `- ${fmtDate(r.created_at)} (${mood}): ${r.summary || '(no summary)'}`
     })
   return (
     "\n\nContext from the person's recent sessions (use this to notice patterns " +
@@ -174,11 +190,13 @@ function validMessages(messages) {
   )
 }
 
-function nowStamp() {
-  const d = new Date()
+// Same "YYYY-MM-DD HH:MM" display string the API has always returned.
+function fmtDate(d) {
   const pad = (x) => String(x).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
+
+const withDate = ({ created_at, ...row }) => ({ ...row, date: fmtDate(created_at) })
 
 const textOf = (resp) =>
   resp.content
@@ -194,7 +212,7 @@ app.post('/api/chat', async (req, res) => {
   if (!validMessages(messages)) {
     return res.status(400).json({ error: 'messages must not be empty' })
   }
-  const system = loadSystemPrompt() + recentContext()
+  const system = loadSystemPrompt() + (await recentContext())
 
   res.setHeader('Content-Type', 'text/plain; charset=utf-8')
   try {
@@ -249,30 +267,33 @@ app.post('/api/end-session', async (req, res) => {
     // save the session even if the summary call fails
   }
 
-  const date = nowStamp()
-  const info = db
-    .prepare('INSERT INTO conversations (date, mood, summary, messages) VALUES (?, ?, ?, ?)')
-    .run(date, mood, summary, JSON.stringify(messages))
-  res.json({ id: info.lastInsertRowid, date, mood, summary })
+  const { rows } = await db.query(
+    'INSERT INTO conversations (mood, summary, messages) VALUES ($1, $2, $3) RETURNING id, created_at',
+    [mood, summary, JSON.stringify(messages)]
+  )
+  res.json({ id: rows[0].id, date: fmtDate(rows[0].created_at), mood, summary })
 })
 
-app.get('/api/conversations', (req, res) => {
-  const rows = db
-    .prepare('SELECT id, date, mood, summary FROM conversations ORDER BY id DESC')
-    .all()
-  res.json(rows)
+app.get('/api/conversations', async (req, res) => {
+  const { rows } = await db.query(
+    'SELECT id, created_at, mood, summary FROM conversations ORDER BY id DESC'
+  )
+  res.json(rows.map(withDate))
 })
 
-app.get('/api/conversations/:id', (req, res) => {
-  const row = db.prepare('SELECT * FROM conversations WHERE id = ?').get(req.params.id)
-  if (!row) return res.status(404).json({ error: 'conversation not found' })
-  res.json({ ...row, messages: JSON.parse(row.messages) })
+app.get('/api/conversations/:id', async (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isInteger(id)) return res.status(404).json({ error: 'conversation not found' })
+  const { rows } = await db.query('SELECT * FROM conversations WHERE id = $1', [id])
+  if (rows.length === 0) return res.status(404).json({ error: 'conversation not found' })
+  res.json(withDate(rows[0])) // messages is JSONB — already parsed
 })
 
-app.get('/api/moods', (req, res) => {
-  const entries = db
-    .prepare('SELECT id, date, mood FROM conversations WHERE mood IS NOT NULL ORDER BY id')
-    .all()
+app.get('/api/moods', async (req, res) => {
+  const { rows } = await db.query(
+    'SELECT id, created_at, mood FROM conversations WHERE mood IS NOT NULL ORDER BY id'
+  )
+  const entries = rows.map(withDate)
   const result = { entries, average: null, trend: null }
   const vals = entries.map((e) => e.mood)
   if (vals.length > 0) {
@@ -290,12 +311,11 @@ app.get('/api/moods', (req, res) => {
 })
 
 app.get('/api/summaries', async (req, res) => {
-  const sessions = db
-    .prepare(
-      "SELECT id, date, mood, summary FROM conversations " +
-        "WHERE summary IS NOT NULL AND summary != '' ORDER BY id"
-    )
-    .all()
+  const { rows } = await db.query(
+    "SELECT id, created_at, mood, summary FROM conversations " +
+      "WHERE summary IS NOT NULL AND summary != '' ORDER BY id"
+  )
+  const sessions = rows.map(withDate)
   let patterns = null
   if (sessions.length >= 2) {
     const notes = sessions
@@ -330,6 +350,7 @@ if (fs.existsSync(FRONTEND_DIST)) {
   })
 }
 
+await initDb()
 app.listen(PORT, () => {
   console.log(`Ember backend listening on port ${PORT}`)
 })

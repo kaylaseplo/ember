@@ -5,7 +5,7 @@ chat with streaming responses, mood tracking with a trend chart, past entries,
 and cross-session pattern insights. Warm, dark, and quiet by design. Works on
 phone and desktop browsers, and can be added to an iPhone home screen (PWA).
 
-- **Backend**: Node.js/Express + Anthropic SDK (Claude Opus 4.8) + SQLite
+- **Backend**: Node.js/Express + Anthropic SDK (Claude Opus 4.8) + Postgres (Neon works well)
 - **Frontend**: React (Vite), mobile-first, warm dark theme by default, served by the backend
 
 ## Run locally
@@ -14,6 +14,10 @@ phone and desktop browsers, and can be added to an iPhone home screen (PWA).
 export ANTHROPIC_API_KEY=sk-ant-...
 export APP_PASSCODE=...       # the passcode that unlocks the app (required)
 export SESSION_SECRET=...     # long random string used to sign session cookies
+export DATABASE_URL=postgres://...   # Postgres connection string (required)
+# For local dev without a Neon database, a throwaway Docker Postgres works:
+#   docker run -d --name ember-pg -e POSTGRES_PASSWORD=ember -p 5432:5432 postgres:16
+#   export DATABASE_URL=postgres://postgres:ember@localhost:5432/postgres
 
 # backend
 cd backend && npm install && npm start   # or `npm run dev` for auto-reload
@@ -29,21 +33,22 @@ backend — it serves `frontend/dist` at `/`.
 
 1. Push this repo to GitHub.
 2. On render.com: **New → Blueprint**, pick the repo (uses `render.yaml`).
-3. Set `ANTHROPIC_API_KEY`, `APP_PASSCODE`, and `SESSION_SECRET` when prompted
-   (all three must be set before deploying; the server refuses to start
-   without `APP_PASSCODE`). Done.
+3. Set `ANTHROPIC_API_KEY`, `APP_PASSCODE`, `SESSION_SECRET`, and
+   `DATABASE_URL` when prompted (all must be set before deploying; the server
+   refuses to start without the passcode or database URL). Done.
 
-Note: on Render's free tier the filesystem is ephemeral — the SQLite DB resets
-on redeploy. Attach a persistent disk (paid) and point `DATA_DIR` at it to keep
-history across deploys.
+Data lives in an external Postgres database (`DATABASE_URL`) — a free
+[Neon](https://neon.tech) database works well and survives Render's ephemeral
+filesystem. The schema is created automatically on first boot. SSL is used
+automatically for non-localhost connections (Neon requires it).
 
 ## Deploy to Railway
 
 1. Push to GitHub, create a new Railway project from the repo.
 2. Build command: `cd backend && npm ci && cd ../frontend && npm ci && npm run build`
 3. Start command: `node backend/server.js`
-4. Add `ANTHROPIC_API_KEY`, `APP_PASSCODE`, and `SESSION_SECRET`. Optionally
-   mount a volume and set `DATA_DIR` to it.
+4. Add `ANTHROPIC_API_KEY`, `APP_PASSCODE`, `SESSION_SECRET`, and
+   `DATABASE_URL`.
 
 ## API
 
@@ -69,10 +74,23 @@ session cookie and return 401 without it.
 | `ANTHROPIC_API_KEY` | yes | Claude API access (server-side only) |
 | `APP_PASSCODE` | yes | The single-user passcode; the server refuses to start without it |
 | `SESSION_SECRET` | recommended | Signs session cookies. If unset, a random one is generated at boot (sessions won't survive restarts) |
-| `DATA_DIR` | no | Where `companion.db` lives (defaults to `./data`) |
+| `DATABASE_URL` | yes | Postgres connection string (e.g. from Neon); the server refuses to start without it |
 
 Never commit real values for any of these — set them in Render/Railway's
 environment settings.
+
+## Migrating old SQLite data
+
+If you have a `data/companion.db` from before the Postgres migration, copy it
+into Postgres once with:
+
+```bash
+cd backend
+DATABASE_URL=postgres://... node migrate-sqlite-to-postgres.js
+```
+
+(Optionally pass a different path to the `.db` file as an argument.) The script
+preserves IDs and is safe to re-run — already-copied rows are skipped.
 
 The Anthropic API key lives only on the server (`ANTHROPIC_API_KEY` env var);
 the frontend never sees it. The system prompt is `SYSTEM_PROMPT.md` at the repo
