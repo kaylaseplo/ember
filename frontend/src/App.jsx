@@ -3,8 +3,8 @@ import Chat from './pages/Chat.jsx'
 import History from './pages/History.jsx'
 import Moods from './pages/Moods.jsx'
 import Summaries from './pages/Summaries.jsx'
-import Lock from './Lock.jsx'
-import { getSession, logout } from './api.js'
+import Login from './Login.jsx'
+import { getMe, logout } from './api.js'
 
 // Monochrome line-art icons; stroke follows the tab's text color.
 const icon = (paths) => (
@@ -40,7 +40,7 @@ export default function App() {
   const [authed, setAuthed] = useState(null) // null = checking
 
   useEffect(() => {
-    getSession().then(setAuthed)
+    getMe().then(user => setAuthed(!!user))
   }, [])
 
   // A 401 mid-session (expired cookie) drops back to the lock screen. The app
@@ -51,7 +51,7 @@ export default function App() {
     return () => window.removeEventListener('ember:locked', onLocked)
   }, [])
 
-  async function lock() {
+  async function signOut() {
     await logout()
     setAuthed(false)
   }
@@ -62,7 +62,7 @@ export default function App() {
 
   return (
     <div className={`app ${light ? 'light' : ''}`}>
-      {locked && <Lock onUnlock={() => setAuthed(true)} />}
+      {locked && <Login onSignedIn={() => setAuthed(true)} />}
 
       <header className="topbar" style={locked ? { display: 'none' } : undefined}>
         <span className="brand">Ember</span>
@@ -71,8 +71,8 @@ export default function App() {
                   aria-label="Toggle light mode">
             {light ? '🌙' : '☀️'}
           </button>
-          <button className="theme-toggle" onClick={lock} aria-label="Lock Ember">
-            🔒
+          <button className="theme-toggle signout" onClick={signOut} aria-label="Sign out">
+            Sign out
           </button>
         </span>
       </header>

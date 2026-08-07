@@ -12,8 +12,8 @@ phone and desktop browsers, and can be added to an iPhone home screen (PWA).
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-export APP_PASSCODE=...       # the passcode that unlocks the app (required)
 export SESSION_SECRET=...     # long random string used to sign session cookies
+export INVITE_CODE=...        # required to create accounts; unset = signup disabled
 export DATABASE_URL=postgres://...   # Postgres connection string (required)
 # For local dev without a Neon database, a throwaway Docker Postgres works:
 #   docker run -d --name ember-pg -e POSTGRES_PASSWORD=ember -p 5432:5432 postgres:16
@@ -33,9 +33,9 @@ backend — it serves `frontend/dist` at `/`.
 
 1. Push this repo to GitHub.
 2. On render.com: **New → Blueprint**, pick the repo (uses `render.yaml`).
-3. Set `ANTHROPIC_API_KEY`, `APP_PASSCODE`, `SESSION_SECRET`, and
-   `DATABASE_URL` when prompted (all must be set before deploying; the server
-   refuses to start without the passcode or database URL). Done.
+3. Set `ANTHROPIC_API_KEY`, `SESSION_SECRET`, `DATABASE_URL`, and
+   `INVITE_CODE` when prompted (the server refuses to start without the
+   database URL). Done.
 
 Data lives in an external Postgres database (`DATABASE_URL`) — a free
 [Neon](https://neon.tech) database works well and survives Render's ephemeral
@@ -47,16 +47,17 @@ automatically for non-localhost connections (Neon requires it).
 1. Push to GitHub, create a new Railway project from the repo.
 2. Build command: `cd backend && npm ci && cd ../frontend && npm ci && npm run build`
 3. Start command: `node backend/server.js`
-4. Add `ANTHROPIC_API_KEY`, `APP_PASSCODE`, `SESSION_SECRET`, and
-   `DATABASE_URL`.
+4. Add `ANTHROPIC_API_KEY`, `SESSION_SECRET`, `DATABASE_URL`, and
+   `INVITE_CODE`.
 
 ## API
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/api/login` | Exchange the passcode for a 30-day session cookie |
-| POST | `/api/logout` | Clear the session cookie (the Lock button) |
-| GET | `/api/session` | `{authenticated: bool}` for the current request |
+| POST | `/api/auth/signup` | Create an account (requires the invite code); logs in |
+| POST | `/api/auth/login` | Email + password → 30-day session cookie |
+| POST | `/api/auth/logout` | Clear the session cookie (Sign out) |
+| GET | `/api/auth/me` | Current user, or 401 |
 | POST | `/api/chat` | Stream a reply (send `{messages: [...]}`, receive plain-text chunks) |
 | POST | `/api/end-session` | Save conversation + mood; generates a summary |
 | GET | `/api/conversations` | List past conversations |
@@ -64,16 +65,16 @@ automatically for non-localhost connections (Neon requires it).
 | GET | `/api/moods` | Mood history, average, trend |
 | GET | `/api/summaries` | Session summaries + cross-session patterns |
 
-All `/api/*` routes except `login`, `logout`, and `session` require the
-session cookie and return 401 without it.
+All `/api/*` routes outside `/api/auth/*` require the session cookie and
+return 401 without it. Every data query is scoped to the signed-in user.
 
 ## Environment variables
 
 | Variable | Required | Purpose |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | yes | Claude API access (server-side only) |
-| `APP_PASSCODE` | yes | The single-user passcode; the server refuses to start without it |
 | `SESSION_SECRET` | recommended | Signs session cookies. If unset, a random one is generated at boot (sessions won't survive restarts) |
+| `INVITE_CODE` | for signup | Required in the signup form to create an account. Unset = signup disabled entirely |
 | `DATABASE_URL` | yes | Postgres connection string (e.g. from Neon); the server refuses to start without it |
 
 Never commit real values for any of these — set them in Render/Railway's
@@ -91,6 +92,20 @@ DATABASE_URL=postgres://... node migrate-sqlite-to-postgres.js
 
 (Optionally pass a different path to the `.db` file as an argument.) The script
 preserves IDs and is safe to re-run — already-copied rows are skipped.
+
+## Claiming pre-account data
+
+Conversations created before accounts existed have no owner and are invisible
+until claimed. Create your account and claim them with:
+
+```bash
+cd backend
+DATABASE_URL=postgres://... node migrate-claim-data.js
+```
+
+It prompts for your email and password (or reads `EMAIL` / `PASSWORD` env
+vars), reuses the account if it already exists, and only claims rows that
+don't belong to anyone — safe to re-run.
 
 The Anthropic API key lives only on the server (`ANTHROPIC_API_KEY` env var);
 the frontend never sees it. The system prompt is `SYSTEM_PROMPT.md` at the repo

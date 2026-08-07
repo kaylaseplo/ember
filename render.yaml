@@ -10,7 +10,7 @@ services:
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false
-      - key: APP_PASSCODE
+      - key: INVITE_CODE
         sync: false
       - key: SESSION_SECRET
         sync: false

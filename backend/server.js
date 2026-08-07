@@ -8,8 +8,8 @@
 //   GET  /api/moods              mood history + trend
 //   GET  /api/summaries          per-session summaries + cross-session patterns
 //
-// Env: ANTHROPIC_API_KEY, APP_PASSCODE, DATABASE_URL (all required).
-// Data lives in Postgres (DATABASE_URL — e.g. a free Neon database).
+// Env: ANTHROPIC_API_KEY, DATABASE_URL, SESSION_SECRET (recommended),
+// INVITE_CODE (enables signup). Data lives in Postgres, scoped per user.
 // Serves the built React frontend from ../frontend/dist when present.
 
 import crypto from 'node:crypto'
@@ -18,6 +18,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import Anthropic from '@anthropic-ai/sdk'
+import bcrypt from 'bcryptjs'
 import cors from 'cors'
 import express from 'express'
 import pg from 'pg'
@@ -37,14 +38,10 @@ if (!DATABASE_URL) {
   process.exit(1)
 }
 
-const PASSCODE = process.env.APP_PASSCODE
-if (!PASSCODE) {
-  console.error(
-    'FATAL: APP_PASSCODE is not set. Refusing to start unprotected — set the ' +
-      'APP_PASSCODE environment variable and restart.'
-  )
-  process.exit(1)
-}
+// Signup is gated behind an invite code; with no INVITE_CODE set, signup is
+// disabled entirely (existing accounts can still log in).
+const INVITE_CODE = process.env.INVITE_CODE || null
+
 let SESSION_SECRET = process.env.SESSION_SECRET
 if (!SESSION_SECRET) {
   SESSION_SECRET = crypto.randomBytes(32).toString('hex')
@@ -64,13 +61,16 @@ const client = new Anthropic() // reads ANTHROPIC_API_KEY
 
 const COOKIE_NAME = 'ember_session'
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
+const BCRYPT_COST = 12
+const MIN_PASSWORD_LENGTH = 12
 
 const sign = (value) =>
   crypto.createHmac('sha256', SESSION_SECRET).update(value).digest('hex')
 
-function makeToken() {
-  const expires = String(Date.now() + SESSION_TTL_MS)
-  return `${expires}.${sign(expires)}`
+// Cookie value: "<userId>.<expiresMs>.<hmac(userId.expiresMs)>"
+function makeToken(userId) {
+  const payload = `${userId}.${Date.now() + SESSION_TTL_MS}`
+  return `${payload}.${sign(payload)}`
 }
 
 function timingSafeEqual(a, b) {
@@ -79,60 +79,123 @@ function timingSafeEqual(a, b) {
   return crypto.timingSafeEqual(ha, hb)
 }
 
-function isAuthenticated(req) {
+// Returns the authenticated user id, or null. The id comes only from the
+// signed cookie — never from the request body or query string.
+function authUserId(req) {
   const cookies = req.headers.cookie || ''
   const match = cookies.split(/;\s*/).find((c) => c.startsWith(`${COOKIE_NAME}=`))
-  if (!match) return false
-  const [expires, sig] = match.slice(COOKIE_NAME.length + 1).split('.')
-  if (!expires || !sig) return false
-  if (!timingSafeEqual(sig, sign(expires))) return false
-  return Number(expires) > Date.now()
+  if (!match) return null
+  const parts = match.slice(COOKIE_NAME.length + 1).split('.')
+  if (parts.length !== 3) return null
+  const [userId, expires, sig] = parts
+  if (!timingSafeEqual(sig, sign(`${userId}.${expires}`))) return null
+  if (Number(expires) <= Date.now()) return null
+  const id = Number(userId)
+  return Number.isInteger(id) ? id : null
 }
 
-// In-memory rate limit for /api/login: 10 attempts per 15 minutes per IP.
+const SESSION_COOKIE_OPTS = { httpOnly: true, secure: true, sameSite: 'strict', path: '/' }
+
+function setSession(res, userId) {
+  res.cookie(COOKIE_NAME, makeToken(userId), { ...SESSION_COOKIE_OPTS, maxAge: SESSION_TTL_MS })
+}
+
+// In-memory rate limit for login/signup: 10 attempts per 15 minutes per IP.
 const LOGIN_WINDOW_MS = 15 * 60 * 1000
 const LOGIN_MAX_ATTEMPTS = 10
-const loginAttempts = new Map() // ip -> { count, resetAt }
+const authAttempts = new Map() // "route:ip" -> { count, resetAt }
 
-function loginRateLimited(ip) {
+function authRateLimited(route, ip) {
+  const key = `${route}:${ip}`
   const now = Date.now()
-  for (const [k, v] of loginAttempts) if (v.resetAt <= now) loginAttempts.delete(k)
-  const entry = loginAttempts.get(ip) || { count: 0, resetAt: now + LOGIN_WINDOW_MS }
+  for (const [k, v] of authAttempts) if (v.resetAt <= now) authAttempts.delete(k)
+  const entry = authAttempts.get(key) || { count: 0, resetAt: now + LOGIN_WINDOW_MS }
   entry.count += 1
-  loginAttempts.set(ip, entry)
+  authAttempts.set(key, entry)
   return entry.count > LOGIN_MAX_ATTEMPTS
 }
 
-app.post('/api/login', (req, res) => {
-  if (loginRateLimited(req.ip)) {
+const normalizeEmail = (email) => String(email).trim().toLowerCase()
+
+// Hash of a throwaway password, compared against when the email doesn't
+// exist so both failure paths cost a bcrypt verify (no timing leak).
+const DUMMY_HASH = bcrypt.hashSync(crypto.randomBytes(24).toString('hex'), BCRYPT_COST)
+
+app.post('/api/auth/signup', async (req, res) => {
+  if (authRateLimited('signup', req.ip)) {
     return res.status(429).json({ error: 'Too many attempts — try again in a bit.' })
   }
-  const { passcode } = req.body || {}
-  if (typeof passcode !== 'string' || !timingSafeEqual(passcode, PASSCODE)) {
-    return res.status(401).json({ error: 'wrong passcode' })
+  if (!INVITE_CODE) {
+    return res.status(403).json({ error: 'Signup is closed right now.' })
   }
-  res.cookie(COOKIE_NAME, makeToken(), {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'strict',
-    maxAge: SESSION_TTL_MS,
-    path: '/',
-  })
+  const { email, password, inviteCode } = req.body || {}
+  if (typeof inviteCode !== 'string' || !timingSafeEqual(inviteCode, INVITE_CODE)) {
+    return res.status(403).json({ error: "That invite code isn't right." })
+  }
+  if (typeof email !== 'string' || !/^\S+@\S+\.\S+$/.test(email.trim())) {
+    return res.status(400).json({ error: "That doesn't look like an email address." })
+  }
+  if (typeof password !== 'string' || password.length < MIN_PASSWORD_LENGTH) {
+    return res.status(400).json({ error: `Passwords need at least ${MIN_PASSWORD_LENGTH} characters.` })
+  }
+  const hash = await bcrypt.hash(password, BCRYPT_COST)
+  try {
+    const { rows } = await db.query(
+      'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email, display_name',
+      [normalizeEmail(email), hash]
+    )
+    setSession(res, rows[0].id)
+    res.json({ user: { id: rows[0].id, email: rows[0].email, displayName: rows[0].display_name } })
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(400).json({ error: 'That email already has an account — try signing in.' })
+    }
+    throw err
+  }
+})
+
+app.post('/api/auth/login', async (req, res) => {
+  if (authRateLimited('login', req.ip)) {
+    return res.status(429).json({ error: 'Too many attempts — try again in a bit.' })
+  }
+  const { email, password } = req.body || {}
+  const user =
+    typeof email === 'string'
+      ? (await db.query(
+          'SELECT id, email, password_hash, display_name FROM users WHERE email = $1',
+          [normalizeEmail(email)]
+        )).rows[0]
+      : undefined
+  // Same generic error (and a bcrypt verify either way) for unknown email
+  // and wrong password, so the endpoint doesn't leak which emails exist.
+  const ok = await bcrypt.compare(String(password ?? ''), user?.password_hash || DUMMY_HASH)
+  if (!user || !ok) {
+    return res.status(401).json({ error: "That email and password don't match." })
+  }
+  setSession(res, user.id)
+  res.json({ user: { id: user.id, email: user.email, displayName: user.display_name } })
+})
+
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie(COOKIE_NAME, SESSION_COOKIE_OPTS)
   res.json({ ok: true })
 })
 
-app.post('/api/logout', (req, res) => {
-  res.clearCookie(COOKIE_NAME, { httpOnly: true, secure: true, sameSite: 'strict', path: '/' })
-  res.json({ ok: true })
+app.get('/api/auth/me', async (req, res) => {
+  const userId = authUserId(req)
+  if (!userId) return res.status(401).json({ error: 'unauthorized' })
+  const { rows } = await db.query(
+    'SELECT id, email, display_name FROM users WHERE id = $1', [userId]
+  )
+  if (rows.length === 0) return res.status(401).json({ error: 'unauthorized' })
+  res.json({ user: { id: rows[0].id, email: rows[0].email, displayName: rows[0].display_name } })
 })
 
-app.get('/api/session', (req, res) => {
-  res.json({ authenticated: isAuthenticated(req) })
-})
-
-// Everything else under /api requires a valid session cookie.
+// Everything else under /api requires a valid session; handlers use req.userId.
 app.use('/api', (req, res, next) => {
-  if (!isAuthenticated(req)) return res.status(401).json({ error: 'unauthorized' })
+  const userId = authUserId(req)
+  if (!userId) return res.status(401).json({ error: 'unauthorized' })
+  req.userId = userId
   next()
 })
 
@@ -147,13 +210,28 @@ const db = new pg.Pool({
 })
 
 async function initDb() {
+  await db.query(`CREATE TABLE IF NOT EXISTS users (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    display_name TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`)
   await db.query(`CREATE TABLE IF NOT EXISTS conversations (
     id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     mood INTEGER,
     summary TEXT,
     messages JSONB NOT NULL
   )`)
+  // Upgrade path for databases created before accounts existed. The column is
+  // nullable: pre-account rows stay invisible until claimed by the one-off
+  // migration script, and every query filters by user_id.
+  await db.query(
+    'ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE'
+  )
+  await db.query('CREATE INDEX IF NOT EXISTS conversations_user_id_idx ON conversations (user_id)')
 }
 
 // ---------- helpers ----------
@@ -164,9 +242,10 @@ function loadSystemPrompt() {
 }
 
 // Summaries of recent sessions, for continuity and pattern recognition.
-async function recentContext(n = 3) {
+async function recentContext(userId, n = 3) {
   const { rows } = await db.query(
-    'SELECT created_at, mood, summary FROM conversations ORDER BY id DESC LIMIT $1', [n]
+    'SELECT created_at, mood, summary FROM conversations WHERE user_id = $1 ORDER BY id DESC LIMIT $2',
+    [userId, n]
   )
   if (rows.length === 0) return ''
   const lines = rows
@@ -212,7 +291,7 @@ app.post('/api/chat', async (req, res) => {
   if (!validMessages(messages)) {
     return res.status(400).json({ error: 'messages must not be empty' })
   }
-  const system = loadSystemPrompt() + (await recentContext())
+  const system = loadSystemPrompt() + (await recentContext(req.userId))
 
   res.setHeader('Content-Type', 'text/plain; charset=utf-8')
   try {
@@ -268,15 +347,16 @@ app.post('/api/end-session', async (req, res) => {
   }
 
   const { rows } = await db.query(
-    'INSERT INTO conversations (mood, summary, messages) VALUES ($1, $2, $3) RETURNING id, created_at',
-    [mood, summary, JSON.stringify(messages)]
+    'INSERT INTO conversations (user_id, mood, summary, messages) VALUES ($1, $2, $3, $4) RETURNING id, created_at',
+    [req.userId, mood, summary, JSON.stringify(messages)]
   )
   res.json({ id: rows[0].id, date: fmtDate(rows[0].created_at), mood, summary })
 })
 
 app.get('/api/conversations', async (req, res) => {
   const { rows } = await db.query(
-    'SELECT id, created_at, mood, summary FROM conversations ORDER BY id DESC'
+    'SELECT id, created_at, mood, summary FROM conversations WHERE user_id = $1 ORDER BY id DESC',
+    [req.userId]
   )
   res.json(rows.map(withDate))
 })
@@ -284,14 +364,18 @@ app.get('/api/conversations', async (req, res) => {
 app.get('/api/conversations/:id', async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isInteger(id)) return res.status(404).json({ error: 'conversation not found' })
-  const { rows } = await db.query('SELECT * FROM conversations WHERE id = $1', [id])
+  const { rows } = await db.query(
+    'SELECT id, created_at, mood, summary, messages FROM conversations WHERE id = $1 AND user_id = $2',
+    [id, req.userId]
+  )
   if (rows.length === 0) return res.status(404).json({ error: 'conversation not found' })
   res.json(withDate(rows[0])) // messages is JSONB — already parsed
 })
 
 app.get('/api/moods', async (req, res) => {
   const { rows } = await db.query(
-    'SELECT id, created_at, mood FROM conversations WHERE mood IS NOT NULL ORDER BY id'
+    'SELECT id, created_at, mood FROM conversations WHERE user_id = $1 AND mood IS NOT NULL ORDER BY id',
+    [req.userId]
   )
   const entries = rows.map(withDate)
   const result = { entries, average: null, trend: null }
@@ -313,7 +397,8 @@ app.get('/api/moods', async (req, res) => {
 app.get('/api/summaries', async (req, res) => {
   const { rows } = await db.query(
     "SELECT id, created_at, mood, summary FROM conversations " +
-      "WHERE summary IS NOT NULL AND summary != '' ORDER BY id"
+      "WHERE user_id = $1 AND summary IS NOT NULL AND summary != '' ORDER BY id",
+    [req.userId]
   )
   const sessions = rows.map(withDate)
   let patterns = null

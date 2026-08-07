@@ -11,24 +11,28 @@ function checkAuth(res) {
   return res
 }
 
-export async function getSession() {
-  const res = await fetch('/api/session')
-  if (!res.ok) return false
+export async function getMe() {
+  const res = await fetch('/api/auth/me')
+  if (!res.ok) return null
   const data = await res.json()
-  return !!data.authenticated
+  return data.user
 }
 
-export async function login(passcode) {
-  const res = await fetch('/api/login', {
+async function authPost(url, body) {
+  const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ passcode }),
+    body: JSON.stringify(body),
   })
-  if (res.status === 429) throw new Error('Too many tries — wait a few minutes.')
-  return res.ok
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || "Something went wrong — try again in a moment.")
+  return data.user
 }
 
-export const logout = () => fetch('/api/logout', { method: 'POST' })
+export const login = (email, password) => authPost('/api/auth/login', { email, password })
+export const signup = (email, password, inviteCode) =>
+  authPost('/api/auth/signup', { email, password, inviteCode })
+export const logout = () => fetch('/api/auth/logout', { method: 'POST' })
 
 export async function streamChat(messages, onChunk) {
   const res = await fetch('/api/chat', {

@@ -211,3 +211,14 @@ button { font: inherit; cursor: pointer; }
 .lock-form input:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
 .lock-message { color: var(--muted); font-style: italic; font-size: 0.92rem; }
 .topbar-actions { display: flex; align-items: center; }
+
+/* ---------- auth screen ---------- */
+.auth-form { flex-direction: column; }
+.auth-form input { width: 100%; text-align: left; letter-spacing: normal; }
+.auth-form .primary { width: 100%; }
+.link {
+  background: none; border: none; color: var(--muted); font: inherit;
+  font-size: 0.9rem; font-style: italic; text-decoration: underline;
+  padding: 8px; min-height: 44px;
+}
+.signout { font-size: 0.85rem; font-style: italic; }
