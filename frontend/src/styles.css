@@ -216,9 +216,11 @@ button { font: inherit; cursor: pointer; }
 .auth-form { flex-direction: column; }
 .auth-form input { width: 100%; text-align: left; letter-spacing: normal; }
 .auth-form .primary { width: 100%; }
+.auth-heading { font-weight: normal; font-size: 1.1rem; color: var(--muted); }
+.auth-switch { color: var(--muted); font-size: 0.9rem; }
 .link {
-  background: none; border: none; color: var(--muted); font: inherit;
-  font-size: 0.9rem; font-style: italic; text-decoration: underline;
-  padding: 8px; min-height: 44px;
+  background: none; border: none; color: var(--accent-bright); font: inherit;
+  font-size: 0.9rem; text-decoration: underline; text-underline-offset: 3px;
+  padding: 8px 4px; min-height: 44px;
 }
 .signout { font-size: 0.85rem; font-style: italic; }

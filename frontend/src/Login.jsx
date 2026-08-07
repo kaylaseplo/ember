@@ -56,6 +56,7 @@ export default function Login({ onSignedIn }) {
   return (
     <div className="lock">
       <Coal />
+      <h2 className="auth-heading">{mode === 'signup' ? 'Create your account' : 'Welcome back'}</h2>
       <form className="lock-form auth-form" onSubmit={submit}>
         {mode === 'signup' && (
           <input
@@ -95,13 +96,15 @@ export default function Login({ onSignedIn }) {
       </form>
       {message && <p className="lock-message">{message}</p>}
       {mode === 'login' ? (
-        <button className="link" onClick={() => switchMode('signup')}>
-          Have an invite code?
-        </button>
+        <p className="auth-switch">
+          Have an invite code?{' '}
+          <button className="link" onClick={() => switchMode('signup')}>Sign up</button>
+        </p>
       ) : (
-        <button className="link" onClick={() => switchMode('login')}>
-          Back to sign in
-        </button>
+        <p className="auth-switch">
+          Already have an account?{' '}
+          <button className="link" onClick={() => switchMode('login')}>Sign in</button>
+        </p>
       )}
     </div>
   )
