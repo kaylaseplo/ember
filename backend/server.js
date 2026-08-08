@@ -11,6 +11,12 @@
 // Env: ANTHROPIC_API_KEY, DATABASE_URL, SESSION_SECRET (recommended),
 // INVITE_CODE (enables signup). Data lives in Postgres, scoped per user.
 // Serves the built React frontend from ../frontend/dist when present.
+//
+// Cost instrumentation (all optional):
+//   CHAT_MODEL / SUMMARY_MODEL / INSIGHTS_MODEL / DIGEST_MODEL  per-job models
+//   ADMIN_EMAIL                    unlocks GET /api/admin/costs for that user
+//   USER_DAILY_SPEND_LIMIT_USD     per-user daily ceiling (default 2.00)
+//   GLOBAL_DAILY_SPEND_LIMIT_USD   global daily circuit breaker (default 50.00)
 
 import crypto from 'node:crypto'
 import fs from 'node:fs'
@@ -23,7 +29,17 @@ import cors from 'cors'
 import express from 'express'
 import pg from 'pg'
 
-const MODEL = 'claude-opus-4-8'
+// Per-job models, configurable without a code change. Chat and the therapy
+// digest (the most reasoning-heavy output) stay on the strongest model;
+// background jobs run on Haiku.
+const CHAT_MODEL = process.env.CHAT_MODEL || 'claude-opus-4-8'
+const SUMMARY_MODEL = process.env.SUMMARY_MODEL || 'claude-haiku-4-5'
+const INSIGHTS_MODEL = process.env.INSIGHTS_MODEL || 'claude-haiku-4-5'
+const DIGEST_MODEL = process.env.DIGEST_MODEL || CHAT_MODEL
+
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || null
+const USER_DAILY_SPEND_LIMIT = Number(process.env.USER_DAILY_SPEND_LIMIT_USD || 2.0)
+const GLOBAL_DAILY_SPEND_LIMIT = Number(process.env.GLOBAL_DAILY_SPEND_LIMIT_USD || 50.0)
 const BASE_DIR = path.dirname(fileURLToPath(import.meta.url))
 const SYSTEM_PROMPT_FILE = path.join(BASE_DIR, '..', 'SYSTEM_PROMPT.md')
 const FRONTEND_DIST = path.join(BASE_DIR, '..', 'frontend', 'dist')
@@ -56,6 +72,118 @@ app.use(cors())
 app.use(express.json({ limit: '2mb' }))
 
 const client = new Anthropic() // reads ANTHROPIC_API_KEY
+
+// ---------- cost instrumentation ----------
+
+// API rates in USD per million tokens, keyed by model string.
+// Retrieved 7 August 2026 from https://platform.claude.com/docs/en/about-claude/pricing
+// (Sonnet 5 rates take effect 1 September 2026.)
+const MODEL_RATES = {
+  'claude-opus-4-8': { input: 5.0, output: 25.0, cacheRead: 0.5, cacheWrite: 6.25 },
+  'claude-haiku-4-5': { input: 1.0, output: 5.0, cacheRead: 0.1, cacheWrite: 1.25 },
+  'claude-sonnet-5': { input: 3.0, output: 15.0, cacheRead: 0.3, cacheWrite: 3.75 },
+}
+
+// Batch API requests are billed at 50% of the standard rates.
+function estimateCost(model, { input, output, cacheRead, cacheWrite }, batch = false) {
+  const rates = MODEL_RATES[model] || MODEL_RATES[Object.keys(MODEL_RATES).find((k) => model?.startsWith(k)) || '']
+  if (!rates) {
+    console.warn(`estimateCost: no rates configured for model "${model}" — recording cost 0`)
+    return 0
+  }
+  const usd =
+    (input * rates.input + cacheRead * rates.cacheRead + cacheWrite * rates.cacheWrite + output * rates.output) /
+    1_000_000
+  return batch ? usd / 2 : usd
+}
+
+// Write one api_usage row per Anthropic API call, from the usage object the
+// API itself reports. Must never break a user request: any failure here is
+// logged and swallowed.
+async function logUsage({
+  userId = null,
+  jobType,
+  model,
+  usage,
+  conversationId = null,
+  durationMs = null,
+  interrupted = false,
+  batch = false,
+}) {
+  try {
+    if (!usage) {
+      console.warn(`api_usage: no usage reported for ${jobType} call — nothing logged`)
+      return
+    }
+    const input = usage.input_tokens || 0
+    const output = usage.output_tokens || 0
+    const cacheRead = usage.cache_read_input_tokens || 0
+    const cacheWrite = usage.cache_creation_input_tokens || 0
+    const cost = estimateCost(model, { input, output, cacheRead, cacheWrite }, batch)
+    await db.query(
+      `INSERT INTO api_usage (user_id, job_type, model, input_tokens, output_tokens,
+         cache_read_tokens, cache_creation_tokens, estimated_cost_usd, conversation_id,
+         duration_ms, interrupted, batch)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      [userId, jobType, model, input, output, cacheRead, cacheWrite, cost, conversationId, durationMs, interrupted, batch]
+    )
+  } catch (e) {
+    console.error('api_usage logging failed (request unaffected):', e.message)
+  }
+}
+
+// Today's estimated spend in USD; userId null = everyone (global breaker).
+// Fails open: a broken query must never lock users out.
+async function dailySpend(userId = null) {
+  try {
+    const { rows } = await db.query(
+      `SELECT COALESCE(SUM(estimated_cost_usd), 0) AS spend FROM api_usage
+       WHERE created_at >= date_trunc('day', now())` + (userId ? ' AND user_id = $1' : ''),
+      userId ? [userId] : []
+    )
+    return Number(rows[0].spend)
+  } catch (e) {
+    console.error('daily spend check failed (failing open):', e.message)
+    return 0
+  }
+}
+
+// Gentle, non-punitive notices — these can land mid-conversation for someone
+// having a hard day, so no alarm, no blame.
+const USER_LIMIT_MESSAGE =
+  "You've reached today's limit for conversations — it resets tomorrow. " +
+  'Everything you shared is saved, and Ember will be right here when you come back.'
+const GLOBAL_LIMIT_MESSAGE =
+  'Ember is taking a short rest right now. Everything you shared is safe — ' +
+  'please check back in a little while.'
+
+// Returns the notice to show if a spend ceiling is hit, else null.
+async function spendCeilingNotice(userId) {
+  const [userSpend, globalSpend] = await Promise.all([dailySpend(userId), dailySpend(null)])
+  if (globalSpend >= GLOBAL_DAILY_SPEND_LIMIT) {
+    console.error(
+      `SPEND LIMIT: global daily ceiling tripped — $${globalSpend.toFixed(2)} >= $${GLOBAL_DAILY_SPEND_LIMIT} (circuit breaker)`
+    )
+    return GLOBAL_LIMIT_MESSAGE
+  }
+  if (userSpend >= USER_DAILY_SPEND_LIMIT) {
+    console.error(
+      `SPEND LIMIT: user ${userId} hit the daily ceiling — $${userSpend.toFixed(2)} >= $${USER_DAILY_SPEND_LIMIT}`
+    )
+    return USER_LIMIT_MESSAGE
+  }
+  return null
+}
+
+// Merge usage fields from streaming events: message_start carries the input
+// side (incl. cache reads/writes), message_delta carries cumulative output.
+function mergeUsage(into, from) {
+  const out = { ...into }
+  for (const k of ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens']) {
+    if (from?.[k] != null) out[k] = from[k]
+  }
+  return out
+}
 
 // ---------- auth ----------
 
@@ -288,6 +416,41 @@ async function initDb() {
     UNIQUE (user_id, range_start, range_end)
   )`)
   await db.query('CREATE INDEX IF NOT EXISTS digests_user_id_idx ON digests (user_id)')
+  // One row per Anthropic API call, with the usage the API actually reported.
+  await db.query(`CREATE TABLE IF NOT EXISTS api_usage (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    job_type TEXT NOT NULL CHECK (job_type IN ('chat', 'summary', 'digest', 'insights')),
+    model TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+    estimated_cost_usd NUMERIC(12, 6) NOT NULL DEFAULT 0,
+    conversation_id INTEGER,
+    duration_ms INTEGER,
+    interrupted BOOLEAN NOT NULL DEFAULT false,
+    batch BOOLEAN NOT NULL DEFAULT false
+  )`)
+  await db.query('CREATE INDEX IF NOT EXISTS api_usage_user_created_idx ON api_usage (user_id, created_at)')
+  await db.query('CREATE INDEX IF NOT EXISTS api_usage_created_idx ON api_usage (created_at)')
+  // Cached cross-session insights, refreshed via the Batch API.
+  await db.query(`CREATE TABLE IF NOT EXISTS insights (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    through_conversation_id INTEGER NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`)
+  // In-flight Batch API jobs, drained by the poller.
+  await db.query(`CREATE TABLE IF NOT EXISTS api_batches (
+    id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    job_type TEXT NOT NULL,
+    context JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`)
 }
 
 // ---------- helpers ----------
@@ -335,20 +498,27 @@ const withDate = ({ created_at, ...row }) => ({ ...row, date: fmtDate(created_at
 
 // Session summary from a finished conversation; '' if the call fails — the
 // close-out must never be blocked by a failed summary.
-async function generateSummary(messages) {
+const SUMMARY_PROMPT =
+  "Summarize this support conversation in 2-3 sentences for the person's " +
+  'own records: key themes, insights, and anything worth bringing to their ' +
+  "therapist. Write in second person ('You explored...')."
+
+async function generateSummary(messages, userId = null, conversationId = null) {
   if (!Array.isArray(messages) || messages.length < 2) return ''
+  const started = Date.now()
   try {
     const resp = await client.messages.create({
-      model: MODEL,
+      model: SUMMARY_MODEL,
       max_tokens: 300,
-      system:
-        "Summarize this support conversation in 2-3 sentences for the person's " +
-        'own records: key themes, insights, and anything worth bringing to their ' +
-        "therapist. Write in second person ('You explored...').",
+      system: SUMMARY_PROMPT,
       messages: [
         ...messages,
         { role: 'user', content: 'Please write the brief session summary now.' },
       ],
+    })
+    await logUsage({
+      userId, jobType: 'summary', model: SUMMARY_MODEL, usage: resp.usage,
+      conversationId, durationMs: Date.now() - started,
     })
     return textOf(resp)
   } catch {
@@ -362,12 +532,14 @@ async function closeConversation(convId, userId, mood) {
     'SELECT id, messages FROM conversations WHERE id = $1 AND user_id = $2', [convId, userId]
   )
   if (rows.length === 0) return null
-  const summary = await generateSummary(rows[0].messages)
+  const summary = await generateSummary(rows[0].messages, userId, convId)
   const { rows: [updated] } = await db.query(
     `UPDATE conversations SET ended_at = now(), updated_at = now(), mood = $3, summary = $4
      WHERE id = $1 AND user_id = $2 RETURNING id, created_at, mood, summary`,
     [convId, userId, mood, summary]
   )
+  // A closed session may make the cached insights stale — refresh via batch.
+  queueInsightsRefresh(userId)
   return updated
 }
 
@@ -385,6 +557,16 @@ app.post('/api/chat', async (req, res) => {
   if (!validMessages(messages)) {
     return res.status(400).json({ error: 'messages must not be empty' })
   }
+
+  // Daily spend ceilings: stream a gentle notice instead of calling the model.
+  // The notice is not saved as part of the conversation.
+  const notice = await spendCeilingNotice(req.userId)
+  if (notice) {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+    res.write(notice)
+    return res.end()
+  }
+
   const system = loadSystemPrompt() + (await recentContext(req.userId))
 
   // Persist the user's message before any model call: create the conversation
@@ -425,22 +607,42 @@ app.post('/api/chat', async (req, res) => {
     }
   }
 
+  // Cache breakpoints: one on the system prompt (stable within a conversation
+  // — recentContext only changes when a session closes) and one on the last
+  // message, so each turn reads the whole prior conversation from cache.
+  // Nothing per-request (timestamps, ids) may enter the prefix.
+  const apiMessages = messages.map((m, i) =>
+    i === messages.length - 1
+      ? { role: m.role, content: [{ type: 'text', text: m.content, cache_control: { type: 'ephemeral' } }] }
+      : m
+  )
+
+  const started = Date.now()
+  let usage = null
+  let interrupted = true // cleared when finalMessage resolves
   const stream = client.messages.stream({
-    model: MODEL,
+    model: CHAT_MODEL,
     max_tokens: 2048,
     system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
     thinking: { type: 'adaptive' },
-    messages,
+    messages: apiMessages,
   })
   res.on('close', () => {
     if (!res.writableFinished) stream.controller.abort() // client went away mid-stream
   })
   try {
+    // Capture usage as it arrives so an interrupted stream still gets logged
+    // with whatever the API reported before the cut.
+    stream.on('streamEvent', (event) => {
+      if (event.type === 'message_start') usage = mergeUsage(usage, event.message.usage)
+      else if (event.type === 'message_delta') usage = mergeUsage(usage, event.usage)
+    })
     stream.on('text', (text) => {
       acc += text
       res.write(text)
     })
     await stream.finalMessage()
+    interrupted = false
   } catch (err) {
     if (err instanceof Anthropic.AuthenticationError) {
       res.write('\n[error] Authentication failed — check ANTHROPIC_API_KEY on the server.')
@@ -452,6 +654,10 @@ app.post('/api/chat', async (req, res) => {
       res.write(`\n[error] ${err.message || err}`)
     }
   } finally {
+    await logUsage({
+      userId: req.userId, jobType: 'chat', model: CHAT_MODEL, usage,
+      conversationId: convId, durationMs: Date.now() - started, interrupted,
+    })
     await saveReply()
     res.end()
   }
@@ -542,31 +748,117 @@ app.get('/api/summaries', async (req, res) => {
     [req.userId]
   )
   const sessions = rows.map(withDate)
+  // Insights are generated asynchronously via the Batch API (50% cheaper) and
+  // cached — this endpoint only reads the cache. If it's stale (or was never
+  // built), kick off a refresh in the background.
   let patterns = null
   if (sessions.length >= 2) {
-    const notes = sessions
-      .slice(-10)
-      .map((s) => `- ${s.date} (mood ${s.mood ?? '?'}/10): ${s.summary}`)
-      .join('\n')
-    try {
-      const resp = await client.messages.create({
-        model: MODEL,
-        max_tokens: 600,
-        system:
-          'You help someone review their mental-health journey between therapy ' +
-          'sessions. Given their session summaries and mood ratings, identify ' +
-          'recurring themes, possible triggers, and progress — written warmly ' +
-          'in second person, in a form they could bring to their therapist. ' +
-          'Keep it under 250 words.',
-        messages: [{ role: 'user', content: `My recent session notes:\n${notes}` }],
-      })
-      patterns = textOf(resp)
-    } catch {
-      patterns = null
-    }
+    const { rows: cached } = await db.query('SELECT content FROM insights WHERE user_id = $1', [req.userId])
+    patterns = cached[0]?.content || null
+    queueInsightsRefresh(req.userId)
   }
   res.json({ sessions: sessions.reverse(), patterns })
 })
+
+// ---------- insights via the Batch API ----------
+
+const INSIGHTS_PROMPT =
+  'You help someone review their mental-health journey between therapy ' +
+  'sessions. Given their session summaries and mood ratings, identify ' +
+  'recurring themes, possible triggers, and progress — written warmly ' +
+  'in second person, in a form they could bring to their therapist. ' +
+  'Keep it under 250 words.'
+
+// Submit a Batch API request to refresh a user's insights, if they're stale
+// and no refresh is already in flight. Safe to call often; never throws.
+async function queueInsightsRefresh(userId) {
+  try {
+    const { rowCount: pending } = await db.query(
+      "SELECT 1 FROM api_batches WHERE user_id = $1 AND job_type = 'insights'", [userId]
+    )
+    if (pending > 0) return
+    const { rows } = await db.query(
+      "SELECT id, created_at, mood, summary FROM conversations " +
+        "WHERE user_id = $1 AND summary IS NOT NULL AND summary != '' ORDER BY id",
+      [userId]
+    )
+    if (rows.length < 2) return
+    const latestId = rows[rows.length - 1].id
+    const { rows: cur } = await db.query(
+      'SELECT through_conversation_id FROM insights WHERE user_id = $1', [userId]
+    )
+    if (cur.length > 0 && cur[0].through_conversation_id >= latestId) return // fresh
+
+    const notes = rows
+      .slice(-10)
+      .map((r) => `- ${fmtDate(r.created_at)} (mood ${r.mood ?? '?'}/10): ${r.summary}`)
+      .join('\n')
+    const batch = await client.messages.batches.create({
+      requests: [
+        {
+          custom_id: `insights-${userId}-${latestId}`,
+          params: {
+            model: INSIGHTS_MODEL,
+            max_tokens: 600,
+            system: INSIGHTS_PROMPT,
+            messages: [{ role: 'user', content: `My recent session notes:\n${notes}` }],
+          },
+        },
+      ],
+    })
+    await db.query(
+      'INSERT INTO api_batches (batch_id, user_id, job_type, context) VALUES ($1, $2, $3, $4)',
+      [batch.id, userId, 'insights', JSON.stringify({ throughConversationId: latestId })]
+    )
+  } catch (e) {
+    console.error('insights batch enqueue failed:', e.message)
+  }
+}
+
+// Drain finished batches: store results, log usage (at batch rates), clean up.
+async function pollBatches() {
+  try {
+    const { rows } = await db.query('SELECT id, batch_id, user_id, job_type, context FROM api_batches')
+    for (const row of rows) {
+      let batch
+      try {
+        batch = await client.messages.batches.retrieve(row.batch_id)
+      } catch (e) {
+        console.error(`batch ${row.batch_id} retrieve failed:`, e.message)
+        continue
+      }
+      if (batch.processing_status !== 'ended') continue
+      try {
+        for await (const result of await client.messages.batches.results(row.batch_id)) {
+          if (result.result.type !== 'succeeded') {
+            console.error(`batch ${row.batch_id} item ${result.custom_id}: ${result.result.type}`)
+            continue
+          }
+          const msg = result.result.message
+          const text = textOf(msg)
+          if (row.job_type === 'insights' && text) {
+            await db.query(
+              `INSERT INTO insights (user_id, content, through_conversation_id, created_at)
+               VALUES ($1, $2, $3, now())
+               ON CONFLICT (user_id) DO UPDATE SET content = EXCLUDED.content,
+                 through_conversation_id = EXCLUDED.through_conversation_id, created_at = now()`,
+              [row.user_id, text, row.context?.throughConversationId ?? 0]
+            )
+          }
+          await logUsage({
+            userId: row.user_id, jobType: row.job_type, model: msg.model,
+            usage: msg.usage, batch: true,
+          })
+        }
+        await db.query('DELETE FROM api_batches WHERE id = $1', [row.id])
+      } catch (e) {
+        console.error(`batch ${row.batch_id} results failed:`, e.message)
+      }
+    }
+  } catch (e) {
+    console.error('batch poll failed:', e.message)
+  }
+}
 
 // ---------- therapy prep ----------
 
@@ -660,6 +952,9 @@ app.post('/api/digests', async (req, res) => {
     return res.status(400).json({ error: "There isn't enough in that range yet." })
   }
 
+  const notice = await spendCeilingNotice(req.userId)
+  if (notice) return res.status(429).json({ error: notice })
+
   // Small ranges get full transcripts; larger ones lean on the stored
   // summaries to keep the request manageable.
   const useTranscripts = convos.length <= 6
@@ -679,9 +974,12 @@ app.post('/api/digests', async (req, res) => {
 
   res.setHeader('Content-Type', 'text/plain; charset=utf-8')
   let acc = ''
+  const started = Date.now()
+  let usage = null
+  let interrupted = true
   try {
     const stream = client.messages.stream({
-      model: MODEL,
+      model: DIGEST_MODEL,
       max_tokens: 2048,
       system: DIGEST_PROMPT,
       thinking: { type: 'adaptive' },
@@ -694,11 +992,16 @@ app.post('/api/digests', async (req, res) => {
           '\n\nPlease write the digest now.',
       }],
     })
+    stream.on('streamEvent', (event) => {
+      if (event.type === 'message_start') usage = mergeUsage(usage, event.message.usage)
+      else if (event.type === 'message_delta') usage = mergeUsage(usage, event.usage)
+    })
     stream.on('text', (text) => {
       acc += text
       res.write(text)
     })
     await stream.finalMessage()
+    interrupted = false
     if (acc.trim()) {
       await db.query(
         `INSERT INTO digests (user_id, range_start, range_end, content)
@@ -711,7 +1014,77 @@ app.post('/api/digests', async (req, res) => {
   } catch (err) {
     res.write(`\n[error] ${err instanceof Anthropic.APIError ? 'API error: ' : ''}${err.message || err}`)
   }
+  await logUsage({
+    userId: req.userId, jobType: 'digest', model: DIGEST_MODEL, usage,
+    durationMs: Date.now() - started, interrupted,
+  })
   res.end()
+})
+
+// ---------- admin cost dashboard ----------
+
+// Only the ADMIN_EMAIL account can see this; everyone else gets a 404 (not a
+// 403) so the route's existence isn't advertised.
+app.get('/api/admin/costs', async (req, res) => {
+  const { rows: me } = await db.query('SELECT email FROM users WHERE id = $1', [req.userId])
+  if (!ADMIN_EMAIL || !me[0] || normalizeEmail(me[0].email) !== normalizeEmail(ADMIN_EMAIL)) {
+    return res.status(404).json({ error: 'not found' })
+  }
+
+  const one = async (sql, params = []) => (await db.query(sql, params)).rows
+  const [totals] = await one(`
+    SELECT
+      COALESCE(SUM(estimated_cost_usd) FILTER (WHERE created_at >= date_trunc('day', now())), 0)   AS today,
+      COALESCE(SUM(estimated_cost_usd) FILTER (WHERE created_at >= date_trunc('week', now())), 0)  AS week,
+      COALESCE(SUM(estimated_cost_usd) FILTER (WHERE created_at >= date_trunc('month', now())), 0) AS month
+    FROM api_usage`)
+  const byJobType = await one(`
+    SELECT job_type, COUNT(*) AS calls, COALESCE(SUM(estimated_cost_usd), 0) AS cost
+    FROM api_usage WHERE created_at >= date_trunc('month', now())
+    GROUP BY job_type ORDER BY cost DESC`)
+  const byModel = await one(`
+    SELECT model, COUNT(*) AS calls, COALESCE(SUM(estimated_cost_usd), 0) AS cost
+    FROM api_usage WHERE created_at >= date_trunc('month', now())
+    GROUP BY model ORDER BY cost DESC`)
+  const [convCost] = await one(`
+    SELECT AVG(c) AS avg,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY c) AS median,
+      percentile_cont(0.9) WITHIN GROUP (ORDER BY c) AS p90
+    FROM (SELECT conversation_id, SUM(estimated_cost_usd) AS c
+          FROM api_usage WHERE conversation_id IS NOT NULL GROUP BY conversation_id) t`)
+  const [convTokens] = await one(`
+    SELECT AVG(i) AS input, AVG(o) AS output, AVG(cr) AS cache_read
+    FROM (SELECT conversation_id, SUM(input_tokens) AS i, SUM(output_tokens) AS o,
+                 SUM(cache_read_tokens) AS cr
+          FROM api_usage WHERE conversation_id IS NOT NULL GROUP BY conversation_id) t`)
+  // Cache hit rate = cache reads as a share of all input-side tokens.
+  const [cache] = await one(`
+    SELECT SUM(cache_read_tokens)::float
+           / NULLIF(SUM(input_tokens + cache_read_tokens + cache_creation_tokens), 0) AS hit_rate
+    FROM api_usage WHERE job_type = 'chat'`)
+  const [turns] = await one(`
+    SELECT AVG(n) AS avg FROM (
+      SELECT conversation_id, COUNT(*) AS n FROM api_usage
+      WHERE job_type = 'chat' AND conversation_id IS NOT NULL GROUP BY conversation_id) t`)
+  const perUser = await one(`
+    SELECT u.email, COUNT(*) AS calls, COALESCE(SUM(a.estimated_cost_usd), 0) AS cost
+    FROM api_usage a JOIN users u ON u.id = a.user_id
+    WHERE a.created_at >= date_trunc('month', now())
+    GROUP BY u.email ORDER BY cost DESC`)
+  const topCalls = await one(`
+    SELECT id, created_at, user_id, job_type, model, input_tokens, output_tokens,
+           cache_read_tokens, cache_creation_tokens, estimated_cost_usd, duration_ms,
+           interrupted, batch
+    FROM api_usage ORDER BY estimated_cost_usd DESC LIMIT 20`)
+
+  res.json({
+    totals, byJobType, byModel,
+    costPerConversation: convCost, tokensPerConversation: convTokens,
+    cacheHitRate: cache?.hit_rate ?? null,
+    avgTurnsPerConversation: turns?.avg ?? null,
+    perUserMonthly: perUser, topCalls,
+    limits: { userDaily: USER_DAILY_SPEND_LIMIT, globalDaily: GLOBAL_DAILY_SPEND_LIMIT },
+  })
 })
 
 // Serve the built frontend (single-service deployment). Registered last so /api wins.
@@ -723,6 +1096,9 @@ if (fs.existsSync(FRONTEND_DIST)) {
 }
 
 await initDb()
+// Drain finished Batch API jobs every minute (and once shortly after boot).
+setInterval(pollBatches, 60_000)
+setTimeout(pollBatches, 5_000)
 app.listen(PORT, () => {
   console.log(`Ember backend listening on port ${PORT}`)
 })

@@ -76,6 +76,17 @@ return 401 without it. Every data query is scoped to the signed-in user.
 | `SESSION_SECRET` | recommended | Signs session cookies. If unset, a random one is generated at boot (sessions won't survive restarts) |
 | `INVITE_CODE` | for signup | Required in the signup form to create an account. Unset = signup disabled entirely |
 | `DATABASE_URL` | yes | Postgres connection string (e.g. from Neon); the server refuses to start without it |
+| `CHAT_MODEL` | no | Model for chat (default `claude-opus-4-8`) |
+| `SUMMARY_MODEL` | no | Model for session summaries (default `claude-haiku-4-5`) |
+| `INSIGHTS_MODEL` | no | Model for cross-session insights, run via the Batch API (default `claude-haiku-4-5`) |
+| `DIGEST_MODEL` | no | Model for the therapy prep digest (default: `CHAT_MODEL`) |
+| `ADMIN_EMAIL` | no | Account allowed to view the cost dashboard at `/#admin` (API: `GET /api/admin/costs`; 404 for everyone else). Unset = dashboard disabled |
+| `USER_DAILY_SPEND_LIMIT_USD` | no | Per-user daily spend ceiling in USD (default `2.00`); chats past it get a gentle "resets tomorrow" notice |
+| `GLOBAL_DAILY_SPEND_LIMIT_USD` | no | Global daily circuit breaker in USD (default `50.00`) |
+
+Every Anthropic API call writes a row to the `api_usage` table (real token
+counts and cache reads from the API's own `usage` report, plus an estimated
+cost). Logging is fail-open: a logging failure never breaks a conversation.
 
 Never commit real values for any of these — set them in Render/Railway's
 environment settings.

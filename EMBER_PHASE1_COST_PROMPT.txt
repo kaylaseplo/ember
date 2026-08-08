@@ -1,0 +1,103 @@
+PHASE 1 — COST INSTRUMENTATION AND OPTIMIZATION
+
+Ember currently calls Claude with no visibility into what it costs. Before I can price this for other people, I need real usage data instead of estimates — and I want the obvious cost savings taken now.
+
+This phase is invisible to users. No UI changes except one admin-only page. Do not change the system prompt, chat behavior, tone, auth, or the visual theme.
+
+================================================================
+PART 1 — LOG EVERY API CALL
+================================================================
+
+Create an `api_usage` table:
+- id, user_id (nullable, for background jobs not tied to a request), created_at
+- job_type: one of 'chat', 'summary', 'digest', 'insights'
+- model (the exact model string used)
+- input_tokens, output_tokens
+- cache_read_tokens, cache_creation_tokens
+- estimated_cost_usd (numeric, computed at write time)
+- conversation_id (nullable), duration_ms
+- Index on (user_id, created_at) and on (created_at)
+
+Every call to the Anthropic API must write a row. The SDK returns usage on the response — read the real values from `response.usage`, including `cache_read_input_tokens` and `cache_creation_input_tokens`. Do not estimate token counts; use what the API reports.
+
+For streaming responses, capture usage from the final message event. If a stream is interrupted, still write a row with whatever usage was reported and flag it.
+
+Cost calculation:
+- Put the per-model rates in a single config object at the top of one file, clearly commented with the date retrieved and a link to https://platform.claude.com/docs/en/about-claude/pricing
+- Calculate as: (uncached_input × input_rate) + (cache_read × cache_read_rate) + (cache_creation × cache_write_rate) + (output × output_rate), all per million tokens
+- Rates as of 7 August 2026: Opus 5 is $5 input / $25 output / $0.50 cache read / $6.25 cache write (5m). Haiku 4.5 is $1 / $5 / $0.10 / $1.25. Sonnet 5 is $3 / $15 / $0.30 / $3.75 from 1 September 2026
+- Logging must never break a user request. Wrap it so a logging failure is caught and logged to console but does not fail the chat
+
+================================================================
+PART 2 — ADMIN COST DASHBOARD
+================================================================
+
+Add an admin-only view showing where the money goes. Gate it behind an ADMIN_EMAIL environment variable — only that user can see it, and the route must 404 (not 403) for anyone else so its existence isn't advertised.
+
+Show:
+- Total spend today, this week, this month
+- Spend broken down by job_type
+- Spend broken down by model
+- Cost per conversation: average, median, and the 90th percentile
+- Average tokens per conversation: input, output, cache read
+- Cache hit rate — cache_read_tokens as a share of total input tokens. This is the number I most want to see
+- Average turns per conversation
+- Per-user monthly cost, sorted descending, so I can see the outliers
+- A simple table of the 20 most expensive individual calls
+
+Style it to match the existing warm theme, but keep it plain and dense — it's a dashboard, not a designed page.
+
+================================================================
+PART 3 — MAKE SURE PROMPT CACHING IS ACTUALLY WORKING
+================================================================
+
+Verify caching is enabled and effective on the chat endpoint, which is where nearly all the spend is.
+
+- Confirm cache_control is applied so the stable prefix — system prompt plus injected session context plus prior conversation turns — is cached
+- The cached prefix must be genuinely stable. If anything varies per request (a timestamp, a random ID, a re-ordered summary block), the cache breaks every time and we pay full price. Audit for this specifically and fix anything that varies
+- After implementing, run a real multi-turn conversation and report the actual cache_read_input_tokens per turn. Tell me the measured cache hit rate — I want the real number, not a claim that it's enabled
+
+================================================================
+PART 4 — ROUTE BACKGROUND JOBS TO CHEAPER MODELS
+================================================================
+
+Chat should stay on the current model for now. Background jobs do not need it:
+
+- Session summaries → Claude Haiku 4.5
+- Insights / pattern analysis → Claude Haiku 4.5
+- Therapy prep digest → keep on the current chat model for now, since it's the most reasoning-heavy output and quality matters most there
+
+Make the model for each job type configurable via environment variables (CHAT_MODEL, SUMMARY_MODEL, INSIGHTS_MODEL, DIGEST_MODEL) with sensible defaults, so I can change any of them without a code change.
+
+After switching, generate one summary with the old model and one with Haiku on the same conversation and show me both outputs side by side so I can judge whether the quality holds.
+
+================================================================
+PART 5 — BATCH API FOR ASYNCHRONOUS WORK
+================================================================
+
+Session summaries and insights are not time-critical — nobody is waiting on them. The Batch API is 50% cheaper.
+
+- Move session summary generation to the Batch API where it doesn't hurt the experience. If a summary currently appears immediately after pressing End, keep a fast path for that, but consider generating it slightly later and showing "summary coming shortly" rather than paying double
+- Insights refreshes should definitely be batched
+- Tell me clearly which jobs you moved to batch and which you left synchronous, and why
+
+If moving summaries to batch would visibly degrade the experience, say so and leave them synchronous. Don't trade the product for a few cents.
+
+================================================================
+PART 6 — SAFETY RAILS
+================================================================
+
+- Add a per-user daily spend ceiling, configurable via an environment variable (default $2.00/day). When a user crosses it, return a calm message that they've reached today's limit and it resets tomorrow. Log it prominently so I can see it happened
+- Add a global daily spend ceiling (default $50/day) as a runaway-cost circuit breaker. If it trips, log loudly and return a maintenance message
+- Both messages must be gentle and non-alarming, matching Ember's tone. Never make someone feel punished for using it too much
+
+================================================================
+CONSTRAINTS
+================================================================
+
+- Every new query must filter by the authenticated user's id where user data is involved, taken from the verified session cookie
+- No changes to the system prompt, chat behavior, tone, visual theme, or auth
+- Logging and metering must never be able to break a conversation. Fail open, not closed
+- Update the README with the new environment variables
+
+When you're done, run a real conversation end to end and show me the resulting api_usage rows — actual token counts, actual cache reads, actual cost. That's the output I care about most.

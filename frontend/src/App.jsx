@@ -3,6 +3,7 @@ import Chat from './pages/Chat.jsx'
 import History from './pages/History.jsx'
 import Moods from './pages/Moods.jsx'
 import Summaries from './pages/Summaries.jsx'
+import Admin from './pages/Admin.jsx'
 import Login from './Login.jsx'
 import Onboarding from './Onboarding.jsx'
 import { getMe, logout, completeOnboarding } from './api.js'
@@ -42,6 +43,15 @@ export default function App() {
   const [showOnboarding, setShowOnboarding] = useState(false)
   const [chatActive, setChatActive] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  // Hidden admin cost dashboard, reached via /#admin (the API 404s for
+  // anyone who isn't the admin account, so this is invisible to everyone else).
+  const [adminView, setAdminView] = useState(window.location.hash === '#admin')
+
+  useEffect(() => {
+    const onHash = () => setAdminView(window.location.hash === '#admin')
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
 
   useEffect(() => {
     getMe().then(u => {
@@ -130,15 +140,16 @@ export default function App() {
       </header>
 
       <main className="content" style={veiled ? { display: 'none' } : undefined}>
+        {adminView && <Admin />}
         {/* Chat stays mounted so an in-progress conversation survives tab switches */}
-        <div style={{ display: tab === 'chat' ? 'contents' : 'none' }}>
+        <div style={{ display: !adminView && tab === 'chat' ? 'contents' : 'none' }}>
           <Chat firstTime={!user?.hasConversations} userId={user?.id}
                 onActiveChange={setChatActive}
                 onSessionSaved={() => setUser(u => (u ? { ...u, hasConversations: true } : u))} />
         </div>
-        {tab === 'history' && <History />}
-        {tab === 'moods' && <Moods />}
-        {tab === 'summaries' && <Summaries />}
+        {!adminView && tab === 'history' && <History />}
+        {!adminView && tab === 'moods' && <Moods />}
+        {!adminView && tab === 'summaries' && <Summaries />}
       </main>
 
       <nav className="tabbar" style={veiled ? { display: 'none' } : undefined}>
